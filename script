@@ -1,0 +1,60 @@
+
+Write-Host ""
+
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "[ERRO] PowerShell não está como administrador." -ForegroundColor Red
+    Pause
+    return
+}
+Write-Host "[OK] PowerShell administrador." -ForegroundColor Green
+
+$SID = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$proxyKey = "Registry::HKEY_USERS\$SID\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+$IsProxyEnabled = (Get-ItemProperty -Path $proxyKey -ErrorAction Stop).ProxyEnable
+
+if ($IsProxyEnabled -eq 1) {
+    Write-Host "[ERRO] Proxy de $env:USERNAME está ativo" -ForegroundColor Red
+    Pause
+    return
+}
+Write-Host "[OK] Proxy desabilitado." -ForegroundColor Green
+
+if ((Get-WmiObject Win32_ComputerSystem).PartOfDomain) {
+    Write-Host "[ERRO] Computador em domínio AD" -ForegroundColor Red
+    Pause
+    return
+}
+Write-Host "[OK] Computador não está em domínio AD." -ForegroundColor Green
+
+try {
+    $package = Get-ProvisioningPackage -ErrorAction Stop |
+               Where-Object { $_.PackageName -eq "AeC" }
+}
+catch {
+    Write-Host "[ERRO] Tente rodar novamente criando um novo usuário administrador local" -ForegroundColor Red
+}
+
+if ($package) {
+    Write-Host "[ERRO] Máquina já tem um pacote de provisionamento Intune!" -ForegroundColor Red
+    Pause
+    return
+}
+
+$ppkgDir = "C:\ppkg"
+if (-not (Test-Path $ppkgDir)) {
+    New-Item -Path $ppkgDir -ItemType Directory | Out-Null
+}
+
+$ppkgFile = "$ppkgDir\bulkenroll.ppkg"
+
+try {
+    Invoke-WebRequest -Uri "https://blkenidenraec.blob.core.windows.net/file/bulkenroll.ppkg?sp=r&st=2025-12-10T12:13:56Z&se=2027-06-01T17:28:56Z&spr=https&sv=2024-11-04&sr=b&sig=iprwdJwLant01EeNG9FFUgN8d8VoAjKkHpeck9rE3Ps%3D" -OutFile $ppkgFile -ErrorAction Stop
+
+    Write-Host "[OK] Pacote baixado." -ForegroundColor Green
+}
+catch {
+    Write-Host "[ERRO] Não foi possível baixar o pacote de provisionamento, verifique a conexão." -ForegroundColor Red
+}
+
+Install-ProvisioningPackage -PackagePath $ppkgFile -ForceInstall -QuietInstall -ErrorAction Stop
+    
