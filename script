@@ -1,60 +1,477 @@
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 
-Write-Host ""
+function Get-SSCredential {
+	$encryptedString = "01000000d08c9ddf0115d1118c7a00c04fc297eb01000000b3f679d3eea04a44ae420faba61f42c90000000002000000000010660000000100002000000050b48aab3a1cae1422814604215d70dbb8333f3365c408aa674d440d24b32fed000000000e800000000200002000000032b2630408184ac7f48d53ecfa443e578f09f3a1a0326c8bf4f660d08a3b43ce2000000053a6e428762267673db6b45f841b47afa128db04f7bb8c721184271906a8602740000000e1e2e254c0a216b28a85ad033b12164ab1cb0a6f5c1d72db03c86124a713eb61c9be8f9b10787bb8e24cd7b626480798d50230b70cfb369b7fb9e0e2b50a4b61"
+	$storedSecure = ConvertTo-SecureString $encryptedString
 
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "[ERRO] PowerShell não está como administrador." -ForegroundColor Red
-    Pause
-    return
+	$inputSecure = Read-Host " Senha" -AsSecureString
+	Write-Host ""
+	
+	$storedPlain = (New-Object System.Net.NetworkCredential("", $storedSecure)).Password
+	$inputPlain  = (New-Object System.Net.NetworkCredential("", $inputSecure)).Password
+
+	if ($storedPlain -eq $inputPlain) {
+		return $true
+	} else {
+		Write-Host " Senha incorreta. Ação cancelada." -ForegroundColor Red
+		return $false
+	}
 }
-Write-Host "[OK] PowerShell administrador." -ForegroundColor Green
-
-$SID = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$proxyKey = "Registry::HKEY_USERS\$SID\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-$IsProxyEnabled = (Get-ItemProperty -Path $proxyKey -ErrorAction Stop).ProxyEnable
-
-if ($IsProxyEnabled -eq 1) {
-    Write-Host "[ERRO] Proxy de $env:USERNAME está ativo" -ForegroundColor Red
-    Pause
-    return
-}
-Write-Host "[OK] Proxy desabilitado." -ForegroundColor Green
-
-if ((Get-WmiObject Win32_ComputerSystem).PartOfDomain) {
-    Write-Host "[ERRO] Computador em domínio AD" -ForegroundColor Red
-    Pause
-    return
-}
-Write-Host "[OK] Computador não está em domínio AD." -ForegroundColor Green
-
-try {
-    $package = Get-ProvisioningPackage -ErrorAction Stop |
-               Where-Object { $_.PackageName -eq "AeC" }
-}
-catch {
-    Write-Host "[ERRO] Tente rodar novamente criando um novo usuário administrador local" -ForegroundColor Red
+function Get-ActiveUser {
+	$rawUser = (query user | Select-String 'Ativo|Active' | ForEach-Object { ($_ -split '\s+')[0] })
+	return $rawUser.TrimStart('>')
 }
 
-if ($package) {
-    Write-Host "[ERRO] Máquina já tem um pacote de provisionamento Intune!" -ForegroundColor Red
-    Pause
-    return
+function Get-ActiveUserSid {
+	$user = Get-ActiveUser
+	return (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | Where-Object { $_.ProfileImagePath -eq "C:\Users\$user" }).PSChildName
 }
 
-$ppkgDir = "C:\ppkg"
-if (-not (Test-Path $ppkgDir)) {
-    New-Item -Path $ppkgDir -ItemType Directory | Out-Null
+function Edit-Reg {
+	param(
+		[Parameter(Mandatory=$false)][ValidateSet("Create","Remove")][string]$Action = "Create",
+		[Parameter(Mandatory=$true)][string]$Path,
+		[Parameter(Mandatory=$false)][ValidateSet("Item","Property")][string]$Target = "Property",
+		[Parameter(Mandatory=$false)][Alias("Name")][string]$PName,
+		[Parameter(Mandatory=$false)][ValidateSet("DWord","String")][string]$Type,
+		[Parameter(Mandatory=$false)]$Value
+	)
+				
+	$sid = Get-ActiveUserSid
+	
+	$regPath = if ($Path -like 'HKCU:\*') {
+		$Path -replace '^HKCU:', "HKU:\$sid"
+	} elseif ($Path -like 'ADM:\*') {
+		$Path -replace '^ADM:', "HKCU:"
+	} else {
+		$Path
+	}
+	if ($Action -eq "Remove") {
+		try {
+			if ($Target -eq "Item") {
+				Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
+			} else {
+				Remove-ItemProperty -Path $regPath -Name $PName -ErrorAction SilentlyContinue
+			}
+		} catch {
+			Write-Host ("Erro ao remover a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+		}
+		return
+	}
+	
+	if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+	if ($Target -ne "Property") { return }
+	try {
+		if ($Type -eq "DWord") {
+			New-ItemProperty -Path $regPath -Name $PName -Value ([int]$Value) -PropertyType DWord -Force | Out-Null
+		} else {
+			New-ItemProperty -Path $regPath -Name $PName -Value ([string]$Value) -PropertyType String -Force | Out-Null
+		}
+	} catch {
+		Write-Host ("Erro ao criar/editar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+	}
 }
 
-$ppkgFile = "$ppkgDir\bulkenroll.ppkg"
+function Remove-FSItem {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path
+	)
 
-try {
-    Invoke-WebRequest -Uri "https://blkenidenraec.blob.core.windows.net/file/bulkenroll.ppkg?sp=r&st=2025-12-10T12:13:56Z&se=2027-06-01T17:28:56Z&spr=https&sv=2024-11-04&sr=b&sig=iprwdJwLant01EeNG9FFUgN8d8VoAjKkHpeck9rE3Ps%3D" -OutFile $ppkgFile -ErrorAction Stop
-
-    Write-Host "[OK] Pacote baixado." -ForegroundColor Green
+	try {
+		Remove-Item -Path $Path -Recurse -Force -ErrorAction SilentlyContinue
+	} catch {
+		Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+	}
 }
-catch {
-    Write-Host "[ERRO] Não foi possível baixar o pacote de provisionamento, verifique a conexão." -ForegroundColor Red
+
+function Select-FromMenu {
+	param(
+		[Parameter(Mandatory=$true)][array]$Options,
+		[Parameter(Mandatory=$true)][ref]$OutputVariable,
+		[Parameter(Mandatory=$true)][string]$Prompt
+	)
+
+	$selectedIndex = 0
+
+	function Write-OptionItem {
+		param(
+			[int]$Index,
+			[bool]$IsSelected,
+			[int]$TopLine
+		)
+
+		[Console]::SetCursorPosition(0, $TopLine + $Index)
+		$label = "  $($Options[$Index])"
+		$lineText = $label.PadRight([Math]::Max([Console]::WindowWidth - 1, $label.Length))
+		if ($IsSelected) {
+			Write-Host " > $lineText" -ForegroundColor Green -NoNewline
+		} else {
+			Write-Host "   $lineText" -ForegroundColor White -NoNewline
+		}
+	}
+
+	Clear-Host
+	Write-Host ""
+	Write-Host " $Prompt" -ForegroundColor Cyan
+	Write-Host ""
+	$menuTop = [Console]::CursorTop
+
+	for ($i = 0; $i -lt $Options.Count; $i++) {
+		Write-OptionItem -Index $i -IsSelected ($i -eq $selectedIndex) -TopLine $menuTop
+	}
+
+	[Console]::CursorVisible = $false
+	try {
+		:KeyLoop while ($true) {
+			$key = [Console]::ReadKey($true)
+			switch ($key.Key) {
+				"UpArrow" {
+					$previousIndex = $selectedIndex
+					if ($selectedIndex -gt 0) { $selectedIndex-- } else { $selectedIndex = $Options.Count - 1 }
+					Write-OptionItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+					Write-OptionItem -Index $selectedIndex -IsSelected $true -TopLine $menuTop
+				}
+				"DownArrow" {
+					$previousIndex = $selectedIndex
+					if ($selectedIndex -lt ($Options.Count - 1)) { $selectedIndex++ } else { $selectedIndex = 0 }
+					Write-OptionItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+					Write-OptionItem -Index $selectedIndex -IsSelected $true -TopLine $menuTop
+				}
+				"Enter" {
+					$OutputVariable.Value = $Options[$selectedIndex]
+					break KeyLoop
+				}
+				"Escape" {
+					break KeyLoop
+				}
+			}
+		}
+	} finally {
+		[Console]::CursorVisible = $true
+	}
+	Clear-Host
 }
 
-Install-ProvisioningPackage -PackagePath $ppkgFile -ForceInstall -QuietInstall -ErrorAction Stop
-    
+function Show-FirstMenu {
+	param(
+		[array]$Items,
+		[int]$SelectedIndex = 0
+	)
+
+	function Write-MenuItem {
+		param(
+			[int]$Index,
+			[bool]$IsSelected,
+			[int]$TopLine
+		)
+
+		[Console]::SetCursorPosition(0, $TopLine + $Index)
+		$label = "  $($Items[$Index].Nome)"
+		$lineText = $label.PadRight([Math]::Max([Console]::WindowWidth - 1, $label.Length))
+		if ($IsSelected) {
+			Write-Host " > $lineText" -ForegroundColor Green -NoNewline
+		} else {
+			Write-Host "   $lineText" -ForegroundColor White -NoNewline
+		}
+	}
+
+	while ($true) {
+		Clear-Host
+		Write-Host ""
+		Write-Host " ↑ e ↓ para navegar, Enter para executar, Esc para sair." -ForegroundColor Cyan
+		Write-Host " Enter para executar, Esc para sair." -ForegroundColor Cyan
+		Write-Host ""
+		$menuTop = [Console]::CursorTop
+
+		for ($i = 0; $i -lt $Items.Count; $i++) {
+			Write-MenuItem -Index $i -IsSelected ($i -eq $SelectedIndex) -TopLine $menuTop
+		}
+
+		[Console]::CursorVisible = $false
+		try {
+			:KeyLoop while ($true) {
+				$key = [Console]::ReadKey($true)
+				switch ($key.Key) {
+					"UpArrow" {
+						$previousIndex = $SelectedIndex
+						if ($SelectedIndex -gt 0) { $SelectedIndex-- } else { $SelectedIndex = $Items.Count - 1 }
+						Write-MenuItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+						Write-MenuItem -Index $SelectedIndex -IsSelected $true -TopLine $menuTop
+					}
+					"DownArrow" {
+						$previousIndex = $SelectedIndex
+						if ($SelectedIndex -lt ($Items.Count - 1)) { $SelectedIndex++ } else { $SelectedIndex = 0 }
+						Write-MenuItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+						Write-MenuItem -Index $SelectedIndex -IsSelected $true -TopLine $menuTop
+					}
+					"Enter" {
+						break KeyLoop
+					}
+					"Escape" {
+						return
+					}
+				}
+			}
+		} finally {
+			[Console]::CursorVisible = $true
+		}
+
+		Clear-Host
+		$selected = $Items[$SelectedIndex]
+		Write-Host (" Executando: {0}" -f $selected.Nome) -ForegroundColor Cyan
+		Write-Host "-------------------------------------------" -ForegroundColor DarkGray
+		try {
+			& $selected.Acao
+		} catch {
+			Write-Host ""
+			Write-Host (" Erro: {0}" -f $_.Exception.Message) -ForegroundColor Red
+		}
+		Write-Host ""
+		Write-Host " Pressione qualquer tecla para voltar ao menu..." -ForegroundColor Gray
+		[void][Console]::ReadKey($true)
+		$SelectedIndex = 0
+	}
+}
+
+$scripts = @(
+	[pscustomobject]@{
+		Nome = "Liberar ADM"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Write-Host " Ajustando permissões de administrador..." -ForegroundColor Cyan
+			Write-Host " Esta configuração não é eficaz em todos os sistemas pois não sobrepõe as políticas de grupo locais ou de domínio." -ForegroundColor Yellow
+			Edit-Reg -Action "Remove" -Path "ADM:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
+            Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
+            Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Target "Item" 
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Type "DWord" -Value 3
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Type "DWord" -Value 0
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Type "DWord" -Value 1
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "PromptOnSecureDesktop" -Type "DWord" -Value 0
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableRegistryTools" -Type "DWord" -Value 0
+
+			Write-Host " Permissões ajustadas!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Fechar Cisco/CallControl"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Write-Host " Fechando processos..." -ForegroundColor Cyan
+            Get-Process cis*,mb*,-hide*,comm*,2comm* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+			Write-Host " Finalizado!" -ForegroundColor Green
+		}
+	}
+
+	[pscustomobject]@{
+		Nome = "Configura Cisco"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$cisoRegPath32 = "HKLM:\SOFTWARE\WOW6432Node\Cisco Systems, Inc.\Cisco IP Communicator"
+			$ramal = $null
+			$site = $null
+
+			$user = (Read-Host "Informe o PIN ou usuário").Trim()
+
+			function Search-Ramal {
+				param(
+					[Parameter(Mandatory=$true)][string]$LookupValue
+				)
+
+				$resp = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tales-bouchardet/test/refs/heads/main/romulo.grupoaec/ramal_tim.txt" -UseBasicParsing -ErrorAction SilentlyContinue).Content
+				Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
+
+				$lookupNormalized = $LookupValue.Trim()
+				$lookupPin = ($lookupNormalized -replace '\D', '')
+				if ($resp) {
+					$lines = $resp -split "`r?`n"
+
+					foreach ($line in $lines) {
+						if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+						$parts = $line.Split(',')
+						if ($parts.Count -lt 3) { continue }
+
+						$pinCandidate    = $parts[0].Trim().Trim([char]0xFEFF)
+						$ramalCandidate  = $parts[1].Trim()
+						$userCandidate   = $parts[2].Trim()
+
+						Write-Host " Verificando linha: PIN='$pinCandidate', Ramal='$ramalCandidate', Usuário='$userCandidate'" -ForegroundColor DarkGray
+
+						$pinCandidateNormalized = ($pinCandidate -replace '\D', '')
+						$isPinMatch = ($lookupPin.Length -gt 0 -and $lookupPin -eq $pinCandidateNormalized)
+						$isUserMatch = $lookupNormalized.Equals($userCandidate, [System.StringComparison]::OrdinalIgnoreCase)
+
+						if (-not ($isPinMatch -or $isUserMatch)) { continue }
+
+						if ($ramalCandidate -notmatch '^\d{7}$') { continue }
+
+						switch ($ramalCandidate.Substring(0, 3)) {
+							"312" { $resolvedSite = "BH" }
+							"382" { $resolvedSite = "MOC" }
+							default { continue }
+						}
+
+						return [pscustomobject]@{
+							Ramal = $ramalCandidate
+							Site  = $resolvedSite
+						}
+					}
+				}
+
+				return $null
+			}
+
+			$searchResult = Search-Ramal -LookupValue $user
+			if ($searchResult) {
+				$ramal = $searchResult.Ramal
+				$site = $searchResult.Site
+			}
+
+			if ([string]::IsNullOrEmpty($ramal)) {
+				Write-Host " Login/PIN não localizado." -ForegroundColor Yellow
+				
+				$retryOptions = @("Tentar novamente", "Digitar manualmente")
+				$retryChoice = $null
+				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o ramal manualmente?"
+
+				if ($retryChoice -eq "Tentar novamente") {
+					$user = (Read-Host " Informe o PIN ou usuário novamente").Trim()
+					$searchResult = Search-Ramal -LookupValue $user
+					if ($searchResult) {
+						$ramal = $searchResult.Ramal
+						$site = $searchResult.Site
+					}
+				}
+			}
+
+			while ([string]::IsNullOrEmpty($site)) {
+				$ramal = Read-Host " Ramal"
+				
+				if ($ramal -notmatch '^\d{7}$') {
+					Write-Host " Ramal inválido. Ramal deve ter 7 dígitos." -ForegroundColor Red
+					continue
+				}
+
+				switch ($ramal.Substring(0, 3)) {
+					"312" { $site = "BH" }
+					"382" { $site = "MOC" }
+					default {
+						Write-Host " Ramal inválido. Ramal TIM começa com 312 ou 382." -ForegroundColor Red
+						$site = $null
+					}
+				}
+			}
+
+			Write-Host " Configurando Cisco para o ramal $ramal do site $site..." -ForegroundColor Cyan
+			if (Test-Path $cisoRegPath32) {
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "AlternateDeviceName" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "NetworkTabUI" -Type "DWord" -Value 2
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "EnableHttpDownload" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "TftpServer1" -Type "DWord" -Value 3229591562
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "TftpServer2" -Type "DWord" -Value 2206167050
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "AlternateTftp" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "EnableSIP" -Type "String" -Value "AEC_$site`_$ramal"
+			}
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	
+	[pscustomobject]@{
+		Nome = "Configura CallControl"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta ToLogado"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }
+
+			$dominio = "grupoaec.com.br"
+			$servers = "MOC","AIR","CPV","MRO","RJO","ORI"
+
+			$selectedSite = $null
+			Select-FromMenu -Options $servers -OutputVariable ([ref]$selectedSite) -Prompt "Selecione o site:"
+
+			if (!$selectedSite) { 
+				Write-Host " Nenhum servidor selecionado. Operação cancelada." -ForegroundColor Yellow		
+				return
+			}
+
+			Write-Host " Configurando ToLogado $selectedSite" -ForegroundColor Cyan
+			Write-Host ""
+
+			Write-Host " Validando conexão com a rede interna..." -ForegroundColor Cyan
+			Write-Host ""
+			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
+			if (-not $testMinhaAec) {
+				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
+				Set-DnsClientGlobalSetting -SuffixSearchList @($dominio)
+				Start-Sleep -Seconds 2
+
+				if (-not $testMinhaAec) {
+					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
+					return
+				}
+			}
+
+			if (-not (Test-Connection "192.168.88.8" -Count 2 -Quiet) -and
+			    -not (Test-Connection "$dominio" -Count 2 -Quiet)) {
+				Write-Host " Não há conexão com o servidor interno ($dominio)." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
+			Write-Host ""
+			$servers = "DGT_PUBL_$selectedSite", "AZURE-SRV01"
+
+			$bestServer = $servers | ForEach-Object {
+				try {
+					$pingResult = Test-Connection $_ -Count 2 -ErrorAction Stop | Measure-Object ResponseTime -Average
+					if ($pingResult) {
+						$r = $pingResult.Average
+						[PSCustomObject]@{Server=$_; Latency=$r}
+					}
+				} catch {}
+			} | Sort-Object Latency | Select-Object -First 1
+
+            if ($bestServer -and $bestServer.Server -ne "AZURE-SRV01") {
+                $tologadoPath = "\\$($bestServer.Server)\to_logado.$\Squirrel\setup.exe"
+            } else {
+                $tologadoPath = "\\AZURE-SRV01\tologado_ho.$\Squirrel\setup.exe"
+            }
+
+			Write-Host (" Servidor selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
+            
+			Get-Process aec*,self*,setup*,chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+			$user = Get-ActiveUser
+
+			Write-Host " Preparando arquivos..." -ForegroundColor Cyan
+            Remove-Item "C:\aec\setup.exe" -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Users\$user\Desktop\tô logado*" -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Users\$user\AppData\Local\ToLogado*" -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
+            New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
+            Copy-Item $tologadoPath "C:\AEC\Setup_ToLogado.exe" -Force
+
+			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut("C:\Users\$user\Desktop\Setup_ToLogado.lnk")
+            $Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
+            $Shortcut.Save()
+			
+			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+			
+	}
+)
+
+Show-FirstMenu -Items $scripts
+#"\\romulo\script_tim.$\Ramal_TIM\RamalP.txt"
