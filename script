@@ -4,7 +4,21 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8
 
 function Get-SSCredential {
+	$encryptedString = "01000000d08c9ddf0115d1118c7a00c04fc297eb01000000b3f679d3eea04a44ae420faba61f42c90000000002000000000010660000000100002000000050b48aab3a1cae1422814604215d70dbb8333f3365c408aa674d440d24b32fed000000000e800000000200002000000032b2630408184ac7f48d53ecfa443e578f09f3a1a0326c8bf4f660d08a3b43ce2000000053a6e428762267673db6b45f841b47afa128db04f7bb8c721184271906a8602740000000e1e2e254c0a216b28a85ad033b12164ab1cb0a6f5c1d72db03c86124a713eb61c9be8f9b10787bb8e24cd7b626480798d50230b70cfb369b7fb9e0e2b50a4b61"
+	$storedSecure = ConvertTo-SecureString $encryptedString -Force
 
+	$inputSecure = Read-Host " Senha" -AsSecureString
+	Write-Host ""
+	
+	$storedPlain = [System.Net.NetworkCredential]::new("", $storedSecure).Password
+	$inputPlain  = [System.Net.NetworkCredential]::new("", $inputSecure).Password
+
+	if ($storedPlain -eq $inputPlain) {
+		return $true
+	} else {
+		Write-Host " Senha incorreta. Ação cancelada." -ForegroundColor Red
+		return $false
+	}
 }
 function Get-ActiveUser {
 	$rawUser = (query user | Select-String 'Ativo|Active' | ForEach-Object { ($_ -split '\s+')[0] })
