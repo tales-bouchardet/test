@@ -814,8 +814,8 @@ $scriptsTim = @(
 
 			if ($proxyModeChoice -eq "Automático") {
 				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.1:8080"
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "<local>"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.150:8080"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "10.*;192.*;172.*;62.101.*;200.198.*;*.timbrasil.com.br;*.timsul.com.br;*.timint;*.tim.it;*.grupoaec.com.br;*.grupoaec.local;aplicacoestim;SNEP*;capps*;RJO*;rjocpdwe03;rjocpdwi07;ccare.blah.com;timbr.upstreamsystems.com;timx-search-prd-001*;exchange2016.aec.com.br;exchange2-2016.aec.com.br;spaceplanning-dev.azure-devices.net;snepsto01v;cbcf;sage;simig;br.msn.com;minhaaec;minhaaec.grupoaec.com.br;authb2b2c.tim.com.br;auth3b2b2c.tim.com.br;*googleapis.com;<local>"
 				Write-Host " Configuração concluída!" -ForegroundColor Green
 				return
 			}
