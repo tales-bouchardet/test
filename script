@@ -42,13 +42,18 @@ function Edit-Reg {
 				
 	$sid = Get-ActiveUserSid
 	
-	$regPath = if ($Path -like 'HKCU:\*') {
-		$Path -replace '^HKCU:', "HKU:\$sid"
-	} elseif ($Path -like 'ADM:\*') {
-		$Path -replace '^ADM:', "HKCU:"
-	} else {
-		$Path
+	if ($Path -like 'HKCU:\*') {
+		$regPath = $Path -replace 'HKCU:', "Registry::HKEY_USERS\$sid"
+
 	}
+	elseif ($Path -like 'ADM:\*') {
+		$regPath = $Path -replace '^ADM:', "HKCU:"
+	}
+	else {
+		$regPath = $Path
+	}
+
+	
 	if ($Action -eq "Remove") {
 		try {
 			if ($Target -eq "Item") {
@@ -73,6 +78,123 @@ function Edit-Reg {
 	} catch {
 		Write-Host ("Erro ao criar/editar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
 	}
+}
+
+function Search-Reg {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path,
+		[Parameter(Mandatory=$false)][Alias("Name")][string]$PName
+	)
+
+	$sid = Get-ActiveUserSid
+
+	$regPath = if ($Path -like 'HKCU:\*') {
+		$Path -replace '^HKCU:', "Registry::HKEY_USERS\$sid"
+	} elseif ($Path -like 'HKCU:\*') {
+		$Path -replace '^HKCU:', "Registry::HKEY_USERS\$sid"
+	} elseif ($Path -like 'ADM:\*') {
+		$Path -replace '^ADM:', "HKCU:"
+	} else {
+		$Path
+	}
+
+	if (-not (Test-Path $regPath)) { return $null }
+
+	try {
+		if ([string]::IsNullOrEmpty($PName)) {
+			return Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+		}
+
+		$propertyBag = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+		if ($null -eq $propertyBag) { return $null }
+
+		return $propertyBag.$PName
+	} catch {
+		Write-Host ("Erro ao consultar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+		return $null
+	}
+}
+
+function Show-ProxyForm {
+    param(
+        $CurrentProxyEnable,
+        [string]$CurrentProxyServer,
+        [string]$CurrentProxyOverride
+    )
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object Windows.Forms.Form
+    $form.Text = "Proxy Form"
+    $form.Size = New-Object Drawing.Size(430,250)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    function Add-Field($label, $y, $text, $multiLine = $false, $height = 23) {
+        $lbl = New-Object Windows.Forms.Label
+        $lbl.Text = $label
+        $lbl.Location = New-Object Drawing.Point(10,$y)
+        $lbl.AutoSize = $true
+        $form.Controls.Add($lbl)
+
+        $txt = New-Object Windows.Forms.TextBox
+        $txt.Location = New-Object Drawing.Point(150,$y)
+        $txt.Size = New-Object Drawing.Size(250,$height)
+        $txt.Multiline = $multiLine
+        if ($multiLine) { $txt.ScrollBars = "Vertical" }
+        $txt.Text = $text
+        $form.Controls.Add($txt)
+
+        return $txt
+    }
+
+    $chkEnable = New-Object Windows.Forms.CheckBox
+    $chkEnable.Text = "Habilitar Proxy"
+    $chkEnable.Location = New-Object Drawing.Point(10,20)
+    $chkEnable.AutoSize = $true
+    $chkEnable.Checked = ([int]$CurrentProxyEnable -eq 1)
+    $form.Controls.Add($chkEnable)
+
+    $txtServer   = Add-Field "ProxyServer:"   55  $CurrentProxyServer
+    $txtOverride = Add-Field "ProxyOverride:" 90  $CurrentProxyOverride $true 70
+
+    $txtServer.Enabled = $chkEnable.Checked
+
+    $chkEnable.Add_CheckedChanged({
+        $txtServer.Enabled = $chkEnable.Checked
+    })
+
+    # Botões levemente mais abaixo
+    $btnOk = New-Object Windows.Forms.Button
+    $btnOk.Text = "Salvar"
+    $btnOk.Size = New-Object Drawing.Size(75,28)
+    $btnOk.Location = New-Object Drawing.Point(245,175)
+    $form.Controls.Add($btnOk)
+
+    $btnCancel = New-Object Windows.Forms.Button
+    $btnCancel.Text = "Cancelar"
+    $btnCancel.Size = New-Object Drawing.Size(75,28)
+    $btnCancel.Location = New-Object Drawing.Point(325,175)
+    $form.Controls.Add($btnCancel)
+
+    $btnOk.Add_Click({
+        $form.Tag = [pscustomobject]@{
+            ProxyEnable   = if ($chkEnable.Checked) { 1 } else { 0 }
+            ProxyServer   = $txtServer.Text.Trim()
+            ProxyOverride = $txtOverride.Text.Trim()
+        }
+
+        $form.DialogResult = "OK"
+        $form.Close()
+    })
+
+    $btnCancel.Add_Click({ $form.Close() })
+
+    if ($form.ShowDialog() -ne "OK") { return $null }
+    return $form.Tag
 }
 
 function Remove-FSItem {
@@ -158,7 +280,9 @@ function Select-FromMenu {
 function Show-FirstMenu {
 	param(
 		[array]$Items,
-		[int]$SelectedIndex = 0
+		[int]$SelectedIndex = 0,
+		[bool]$PauseAfterAction = $true,
+		[bool]$IsRootMenu = $false
 	)
 
 	function Write-MenuItem {
@@ -180,9 +304,9 @@ function Show-FirstMenu {
 
 	while ($true) {
 		Clear-Host
+		$escActionText = if ($IsRootMenu) { "sair" } else { "voltar" }
 		Write-Host ""
-		Write-Host " ↑ e ↓ para navegar, Enter para executar, Esc para sair." -ForegroundColor Cyan
-		Write-Host " Enter para executar, Esc para sair." -ForegroundColor Cyan
+		Write-Host (" ↑ e ↓ para navegar, Enter para executar, Esc para {0}." -f $escActionText) -ForegroundColor Cyan
 		Write-Host ""
 		$menuTop = [Console]::CursorTop
 
@@ -229,14 +353,86 @@ function Show-FirstMenu {
 			Write-Host ""
 			Write-Host (" Erro: {0}" -f $_.Exception.Message) -ForegroundColor Red
 		}
-		Write-Host ""
-		Write-Host " Pressione qualquer tecla para voltar ao menu..." -ForegroundColor Gray
-		[void][Console]::ReadKey($true)
+		if ($PauseAfterAction) {
+			Write-Host ""
+			Write-Host " Pressione qualquer tecla para voltar ao menu..." -ForegroundColor Gray
+			[void][Console]::ReadKey($true)
+		}
 		$SelectedIndex = 0
 	}
 }
 
-$scripts = @(
+function Show-SegmentMenu {
+	param(
+		[Parameter(Mandatory=$true)][hashtable]$Segments
+	)
+
+	$orderedSegments = @("Geral", "Claro", "Oi", "Tim") | Where-Object { $Segments.ContainsKey($_) }
+	$segmentItems = foreach ($segmentName in $orderedSegments) {
+		$collection = $Segments[$segmentName]
+		[pscustomobject]@{
+			Nome = $segmentName
+			Acao = { Show-FirstMenu -Items $collection }.GetNewClosure()
+		}
+	}
+
+	Show-FirstMenu -Items $segmentItems -PauseAfterAction:$false -IsRootMenu:$true
+}
+
+function Search-RamalPinTim {
+	param(
+		[Parameter(Mandatory=$true)][string]$LookupValue
+	)
+
+	$resp = (Invoke-WebRequest -Uri "\\romulo\script_tim.$\Ramal_TIM\RamalP.txt" -UseBasicParsing -ErrorAction SilentlyContinue).Content
+	Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
+
+	$lookupNormalized = $LookupValue.Trim()
+	$lookupPin = ($lookupNormalized -replace '\D', '')
+	if ($resp) {
+		$lines = $resp -split "`r?`n"
+
+		foreach ($line in $lines) {
+			if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+			$parts = $line.Split(',')
+			if ($parts.Count -lt 3) { continue }
+
+			$pinCandidate    = $parts[0].Trim().Trim([char]0xFEFF)
+			$ramalCandidate  = $parts[1].Trim()
+			$userCandidate   = $parts[2].Trim()
+
+			Write-Host " Verificando linha: PIN='$pinCandidate', Ramal='$ramalCandidate', Usuário='$userCandidate'" -ForegroundColor DarkGray
+			Write-Host ""
+
+			$pinCandidateNormalized = ($pinCandidate -replace '\D', '')
+			$isPinMatch = ($lookupPin.Length -gt 0 -and $lookupPin -eq $pinCandidateNormalized)
+			$isUserMatch = $lookupNormalized.Equals($userCandidate, [System.StringComparison]::OrdinalIgnoreCase)
+
+			if (-not ($isPinMatch -or $isUserMatch)) { continue }
+
+			if ($ramalCandidate -notmatch '^\d{7}$') { continue }
+
+			switch ($ramalCandidate.Substring(0, 3)) {
+				"312" { $resolvedSite = "BH" }
+				"382" { $resolvedSite = "MOC" }
+				default { continue }
+			}
+
+			return [pscustomobject]@{
+				Pin   = $pinCandidateNormalized
+				Ramal = $ramalCandidate
+				Site  = $resolvedSite
+			}
+		}
+	}
+
+	return $null
+}
+
+#-----------------------------------Script Session-----------------------------------
+#-----------------------------------Scripts Gerais-----------------------------------
+$scriptsGeral = @(
 	[pscustomobject]@{
 		Nome = "Liberar ADM"
 		Acao = {
@@ -256,14 +452,156 @@ $scripts = @(
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Fechar Cisco/CallControl"
+		Nome = "Limpar arquivos temporários"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
-			Write-Host " Fechando processos..." -ForegroundColor Cyan
-            Get-Process cis*,mb*,-hide*,comm*,2comm* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-			Write-Host " Finalizado!" -ForegroundColor Green
+			Write-Host " Limpando arquivos temporários..." -ForegroundColor Cyan
+			Remove-FSItem -Path "C:\Windows\Temp\*"
+			Remove-FSItem -Path "$env:Temp\*"
+			Write-Host " Concluído!" -ForegroundColor Green
 		}
 	}
+	[pscustomobject]@{
+		Nome = "Win10▼ > Win11▲"
+		Acao = {
+			
+			Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
+
+			function Restart-Explorer {
+				Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+				Start-Sleep -Seconds 2
+				Start-Process explorer.exe -ErrorAction SilentlyContinue
+			}
+
+            function Update-ExplorerColors {
+Add-Type -TypeDefinition @"
+	using System;
+	using System.Runtime.InteropServices;
+	public class Win32 {
+		[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)]
+		public static extern IntPtr SendMessageTimeout(
+			IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
+			uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+	}
+"@ -ErrorAction SilentlyContinue
+
+
+                $HWND_BROADCAST   = [IntPtr]0xffff
+                $WM_SETTINGCHANGE = 0x1A
+                $SMTO_ABORTIFHUNG = 0x2
+                $result = [IntPtr]::Zero
+
+                [void][Win32]::SendMessageTimeout(
+                    $HWND_BROADCAST,
+                    $WM_SETTINGCHANGE,
+                    [IntPtr]::Zero,
+                    "ImmersiveColorSet",
+                    $SMTO_ABORTIFHUNG,
+                    100,
+                    [ref]$result
+                )
+            }
+
+			Stop-Process -Name Widgets -ErrorAction SilentlyContinue
+			Get-AppxPackage Microsoft.WidgetsPlatformRuntime -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			Get-AppxPackage MicrosoftWindows.Client.WebExperience -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			Restart-Explorer
+
+			Edit-Reg -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Type "DWord" -Value 1
+
+			Edit-Reg -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Type "DWord" -Value 1
+
+			Edit-Reg -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
+			Edit-Reg -Path "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
+			Edit-Reg -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowCopilotButton" -Type "DWord" -Value 0
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "IsCopilotAvailable" -Type "DWord" -Value 0
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "CopilotDisabledReason" -Type "String" -Value "IsEnabledForGeographicRegionFailed"
+			Edit-Reg -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsCopilot" -Name "AllowCopilotRuntime" -Type "DWord" -Value 0
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked" -Name "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}" -Type "String" -Value ""
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot\BingChat" -Name "IsUserEligible" -Type "DWord" -Value 0
+
+			Get-AppxPackage -AllUsers *Copilot* | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			Get-AppxPackage -AllUsers Microsoft.MicrosoftOfficeHub | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+
+			try {
+				$appx = (Get-AppxPackage MicrosoftWindows.Client.CoreAI -ErrorAction Stop).PackageFullName
+				$sid = Get-ActiveUserSid
+				Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\EndOfLife\$sid\$appx" -Target "Item" | Out-Null
+				Remove-AppxPackage $appx -ErrorAction SilentlyContinue
+			} catch {}
+
+			if ($Env:OneDrive) { icacls $Env:OneDrive /deny "Administrators:(D,DC)" | Out-Null }
+			Start-Process "C:\Windows\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -Wait -ErrorAction SilentlyContinue
+			Stop-Process -Name FileCoAuth,Explorer -ErrorAction SilentlyContinue
+			Remove-FSItem -Path "$Env:LocalAppData\Microsoft\OneDrive"
+			Remove-FSItem -Path "C:\ProgramData\Microsoft OneDrive"
+			if ($Env:OneDrive) { icacls $Env:OneDrive /grant "Administrators:(D,DC)" | Out-Null }
+			Set-Service -Name OneSyncSvc -StartupType Disabled -ErrorAction SilentlyContinue
+			Start-Process explorer.exe -ErrorAction SilentlyContinue
+
+			@(
+				"Microsoft.XboxIdentityProvider",
+				"Microsoft.XboxSpeechToTextOverlay",
+				"Microsoft.GamingApp",
+				"Microsoft.Xbox.TCUI",
+				"Microsoft.XboxGamingOverlay"
+			) | ForEach-Object {
+				Get-AppxPackage -AllUsers $_ | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			}
+
+			Edit-Reg -Action "Create" -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Target "Property" -Name "(default)" -Type "String" -Value ""
+			Restart-Explorer
+
+			Edit-Reg -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarAl" -Type "DWord" -Value 1
+			Restart-Explorer
+
+			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "AppsUseLightTheme" -Type "DWord" -Value 1
+			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "SystemUsesLightTheme" -Type "DWord" -Value 0
+			Update-ExplorerColors
+		}
+	}
+)
+
+#------------------------------------Scripts Claro-----------------------------------
+$scriptsClaro = @(
+	[pscustomobject]@{
+		Nome = "Configurações Claro"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Write-Host " Configurações específicas para a Claro..." -ForegroundColor Cyan
+			Write-Host " Esta opção é um placeholder para futuras configurações específicas da Claro." -ForegroundColor Yellow
+			Write-Host " Nenhuma ação foi implementada ainda." -ForegroundColor Yellow
+		}
+	}
+)
+
+#--------------------------------------Scripts Oi------------------------------------
+$scriptsOi = @(
+	[pscustomobject]@{
+		Nome = "Configurações Oi"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Write-Host " Configurações específicas para a Oi..." -ForegroundColor Cyan
+			Write-Host " Esta opção é um placeholder para futuras configurações específicas da Oi." -ForegroundColor Yellow
+			Write-Host " Nenhuma ação foi implementada ainda." -ForegroundColor Yellow
+		}
+	}
+)
+
+#--------------------------------------Scripts TIM-----------------------------------
+$scriptsTim = @(
+    [pscustomobject]@{
+        Nome = "Fechar Cisco/CallControl"
+        Acao = {
+            if (-not (Get-SSCredential)) { return }	
+            Write-Host " Fechando processos..." -ForegroundColor Cyan
+
+            Get-Process -Name @('cis*','mb*','*hide*','comm*','2comm*') -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+
+            Write-Host " Finalizado!" -ForegroundColor Green
+        }
+    }
 
 	[pscustomobject]@{
 		Nome = "Configura Cisco"
@@ -276,56 +614,7 @@ $scripts = @(
 
 			$user = (Read-Host "Informe o PIN ou usuário").Trim()
 
-			function Search-Ramal {
-				param(
-					[Parameter(Mandatory=$true)][string]$LookupValue
-				)
-
-				$resp = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tales-bouchardet/test/refs/heads/main/romulo.grupoaec/ramal_tim.txt" -UseBasicParsing -ErrorAction SilentlyContinue).Content
-				Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
-
-				$lookupNormalized = $LookupValue.Trim()
-				$lookupPin = ($lookupNormalized -replace '\D', '')
-				if ($resp) {
-					$lines = $resp -split "`r?`n"
-
-					foreach ($line in $lines) {
-						if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-						$parts = $line.Split(',')
-						if ($parts.Count -lt 3) { continue }
-
-						$pinCandidate    = $parts[0].Trim().Trim([char]0xFEFF)
-						$ramalCandidate  = $parts[1].Trim()
-						$userCandidate   = $parts[2].Trim()
-
-						Write-Host " Verificando linha: PIN='$pinCandidate', Ramal='$ramalCandidate', Usuário='$userCandidate'" -ForegroundColor DarkGray
-
-						$pinCandidateNormalized = ($pinCandidate -replace '\D', '')
-						$isPinMatch = ($lookupPin.Length -gt 0 -and $lookupPin -eq $pinCandidateNormalized)
-						$isUserMatch = $lookupNormalized.Equals($userCandidate, [System.StringComparison]::OrdinalIgnoreCase)
-
-						if (-not ($isPinMatch -or $isUserMatch)) { continue }
-
-						if ($ramalCandidate -notmatch '^\d{7}$') { continue }
-
-						switch ($ramalCandidate.Substring(0, 3)) {
-							"312" { $resolvedSite = "BH" }
-							"382" { $resolvedSite = "MOC" }
-							default { continue }
-						}
-
-						return [pscustomobject]@{
-							Ramal = $ramalCandidate
-							Site  = $resolvedSite
-						}
-					}
-				}
-
-				return $null
-			}
-
-			$searchResult = Search-Ramal -LookupValue $user
+			$searchResult = Search-RamalPinTim -LookupValue $user
 			if ($searchResult) {
 				$ramal = $searchResult.Ramal
 				$site = $searchResult.Site
@@ -339,30 +628,30 @@ $scripts = @(
 				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o ramal manualmente?"
 
 				if ($retryChoice -eq "Tentar novamente") {
-					$user = (Read-Host " Informe o PIN ou usuário novamente").Trim()
-					$searchResult = Search-Ramal -LookupValue $user
+					$user = (Read-Host " Informe o PIN ou usuário").Trim()
+					$searchResult = Search-RamalPinTim -LookupValue $user
 					if ($searchResult) {
 						$ramal = $searchResult.Ramal
 						$site = $searchResult.Site
 					}
 				}
 			}
-
 			while ([string]::IsNullOrEmpty($site)) {
-				$ramal = Read-Host " Ramal"
+				if ([string]::IsNullOrEmpty($ramal)) {
+					$ramal = Read-Host " Ramal"
+				}
 				
 				if ($ramal -notmatch '^\d{7}$') {
 					Write-Host " Ramal inválido. Ramal deve ter 7 dígitos." -ForegroundColor Red
+					$ramal = $null
 					continue
 				}
 
-				switch ($ramal.Substring(0, 3)) {
-					"312" { $site = "BH" }
-					"382" { $site = "MOC" }
-					default {
-						Write-Host " Ramal inválido. Ramal TIM começa com 312 ou 382." -ForegroundColor Red
-						$site = $null
-					}
+				$site = Get-TimSiteFromRamal -Ramal $ramal
+				if ([string]::IsNullOrEmpty($site)) {
+					Write-Host " Ramal inválido. Ramal TIM começa com 312 ou 382." -ForegroundColor Red
+					$ramal = $null
+					$site = $null
 				}
 			}
 
@@ -384,6 +673,49 @@ $scripts = @(
 		Nome = "Configura CallControl"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
+
+			$pin = $null
+			$lookupValue = (Read-Host "Informe o PIN ou usuário").Trim()
+			$searchResult = Search-RamalPinTim -LookupValue $lookupValue
+			if ($searchResult) {
+				$pin = $searchResult.Pin
+			}
+
+			if ([string]::IsNullOrEmpty($pin)) {
+				Write-Host " Login/PIN não localizado." -ForegroundColor Yellow
+				
+				$retryOptions = @("Tentar novamente", "Digitar manualmente")
+				$retryChoice = $null
+				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o PIN manualmente?"
+
+				if ($retryChoice -eq "Tentar novamente") {
+					$lookupValue = (Read-Host " Informe o PIN ou usuário novamente").Trim()
+					$searchResult = Search-RamalPinTim -LookupValue $lookupValue
+					if ($searchResult) {
+						$pin = $searchResult.Pin
+					}
+				}
+			}
+
+			while ([string]::IsNullOrEmpty($pin)) {
+				$pin = (Read-Host " Digite o PIN").Trim()
+
+				if ($pin -notmatch '^\d{7}$') {
+					Write-Host " PIN inválido. PIN deve conter 7 dígitos." -ForegroundColor Red
+					$pin = $null
+					continue
+				}
+
+				if ($pin -notmatch '^(383|313)') {
+					Write-Host " PIN inválido. PIN deve começar com 383 ou 313." -ForegroundColor Red
+					$pin = $null
+					continue
+				}
+			}
+
+			Write-Host " Configurando CallControl para o PIN $pin..." -ForegroundColor Cyan
+			Edit-Reg -Action "Create" -Path "HKCU:\Environment" -Name "AgentID" -Type "String" -Value "$pin" | Out-Null
+			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
 	[pscustomobject]@{
@@ -469,9 +801,63 @@ $scripts = @(
 			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
-			
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Proxy TIM"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+			if (-not (Test-Path $proxyRegPath)) {
+				New-Item -Path $proxyRegPath -Force | Out-Null
+			}
+			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
+			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
+			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
+
+			$proxyModeOptions = @("Automático", "Manual")
+			$proxyModeChoice = $null
+			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy TIM:"
+
+			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Configurando proxy para a TIM..." -ForegroundColor Cyan
+
+			if ($proxyModeChoice -eq "Automático") {
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.1:8080"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "<local>"
+				Write-Host " Configuração concluída!" -ForegroundColor Green
+				return
+			}
+
+			$manualValues = Show-ProxyForm `
+				-CurrentProxyEnable $currentProxyEnable `
+				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
+				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+
+			if ($null -eq $manualValues) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
 	}
 )
 
-Show-FirstMenu -Items $scripts
-#"\\romulo\script_tim.$\Ramal_TIM\RamalP.txt"
+$segments = @{
+	Geral = $scriptsGeral
+	Claro = $scriptsClaro
+	Oi    = $scriptsOi
+	Tim   = $scriptsTim
+}
+
+Show-SegmentMenu -Segments $segments
