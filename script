@@ -4,14 +4,11 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8
 
 function Get-SSCredential {
-    # Hash pré-calculado da senha correta ("Porfavor!")
     $storedHash = "ad43282ea5d872ed9fdb3306e75ed712286a6478c597a05e4bb5ad2eb0d1c70f"
-    # (substitua pelo hash real gerado abaixo)
 
     $inputSecure = Read-Host "Senha" -AsSecureString
     $inputPlain  = [System.Net.NetworkCredential]::new("", $inputSecure).Password
 
-    # Gerar hash SHA256 da senha digitada
     $sha256 = New-Object System.Security.Cryptography.SHA256Managed
     $inputHash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($inputPlain))
     $inputHashHex = -join ($inputHash | ForEach-Object { $_.ToString("x2") })
@@ -388,7 +385,7 @@ function Search-RamalPinTim {
 		[Parameter(Mandatory=$true)][string]$LookupValue
 	)
 
-	$resp = (Invoke-WebRequest -Uri "\\romulo\script_tim.$\Ramal_TIM\RamalP.txt" -UseBasicParsing -ErrorAction SilentlyContinue).Content
+	$resp = (Invoke-WebRequest -Uri "\\romulo\script_tim.$\Ramal_TIM\RamalP.txt" -UseBasicParsing -ErrorAction SilentlyContinue).RawContent
 	Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
 
 	$lookupNormalized = $LookupValue.Trim()
@@ -405,9 +402,6 @@ function Search-RamalPinTim {
 			$pinCandidate    = $parts[0].Trim().Trim([char]0xFEFF)
 			$ramalCandidate  = $parts[1].Trim()
 			$userCandidate   = $parts[2].Trim()
-
-			Write-Host " Verificando linha: PIN='$pinCandidate', Ramal='$ramalCandidate', Usuário='$userCandidate'" -ForegroundColor DarkGray
-			Write-Host ""
 
 			$pinCandidateNormalized = ($pinCandidate -replace '\D', '')
 			$isPinMatch = ($lookupPin.Length -gt 0 -and $lookupPin -eq $pinCandidateNormalized)
