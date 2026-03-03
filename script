@@ -590,6 +590,10 @@ Add-Type -TypeDefinition @"
 		Nome = "Desbloquear Navegadores"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
+			Edit-Reg -Action "Remove" -Path "HKLM:\Software\Google\Chrome" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
 			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Google\Chrome" -Target "Item"
 			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Edge" -Target "Item"
 			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
@@ -688,12 +692,99 @@ Add-Type -TypeDefinition @"
 #------------------------------------Scripts Claro-----------------------------------
 $scriptsClaro = @(
 	[pscustomobject]@{
-		Nome = "Configurações Claro"
+		Nome = "Ajusta Atalhos"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
-			Write-Host " Configurações específicas para a Claro..." -ForegroundColor Cyan
-			Write-Host " Esta opção é um placeholder para futuras configurações específicas da Claro." -ForegroundColor Yellow
-			Write-Host " Nenhuma ação foi implementada ainda." -ForegroundColor Yellow
+			$operacoes = @("AIR", "CPV", "PDI")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+			
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				return
+			}
+
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
+
+			switch ($operacao) {
+				"AIR" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts" -Destination $hostsDir -Force }
+				"PDI" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts" -Destination $hostsDir -Force }
+				"CPV" { Copy-Item "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts" -Destination $hostsDir -Force }
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Proxy Claro"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+			if (-not (Test-Path $proxyRegPath)) {
+				New-Item -Path $proxyRegPath -Force | Out-Null
+			}
+			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
+			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
+			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
+
+			$proxyModeOptions = @("Automático", "Manual")
+			$proxyModeChoice = $null
+			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy Claro:"
+
+			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Configurando proxy para a Claro..." -ForegroundColor Cyan
+
+			if ($proxyModeChoice -eq "Automático") {
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "10.18.4.20:3128"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "spsweb*;*mercury*;*cobranca.claro*;webmail.aec.*;*gestordecobranca*;*cec*;cap.*;caphml.*;*.salesforce.com;*.salesforceliveagent.com;*.force.com;*incontact.com*;*.niceincontact.com*;*nice*;*cc.claro.com.br*;servbus.netservicos.com.br;netsmsapp*;*netsales*;*.claroideias.*;*.rjnet.com.br;*.sgdwebce.*;10.11.*;10.12.*;10.16.*;10.19.*;10.5.*;10.64.*;172.*;187.28.*;192.168.*;5.50.*;alfeu;am.claro.com.br;ativacao;ativacaob.claro.com.br;autocontrole;cachoeiras;cantagalo;cem.claro.com.br;cemi*;centraldecobertura;citrixgwcc*;claro.atenalms.com.br;clarobonus.*;clarobonusb.*;clarogestoronline*;claro-gestoronline.*;clarohelpdesk;claromensagemb.claro.com.br;clarotorpedoweb.*;clarounifica;consultafaturas;contaonline2.claro.com.br;contaonlinepf2.claro.com.br;contingenciaoffline.*;cpc.claro.com.br;ecob.claro.com.br;edoc11g.claro.com.br;empresas.claro.com.br;extratogsm;feu.claro.com.br;ged.claro.com.br;gestaodeconteudo;ggd.claro.com.br;mapacobertura*;idm.claro.com.br;idpinterno.claro.com.br;intranetdeatendimento.claro.com.br;intranetnacional;iw.claro.com.br;lmsclaro;mail.claro.com.br;mar.*;mc;migracaob;migracaob.claro.com.br;minhaaec;in.netservicos.corp;*mtaweb*;mti;oappaut.claro.com.br;owa.claro.com.br;pesquisacob.claro.com.br;pilardosul;pit;portaldeatendimento.claro.com.br;ps8port;ps8web;pugmil*;rjux0105;sgdln.claro.com.br;sgds1.claro.com.br;sgds2.claro.com.br;siga.claro.com.br;sigab.claro.com.br;spaceplanning-dev.azure-devices.net;spnadmin;spntsd01;taguai*;taprd2;ted.claro.com.br;terceiros.embratel.com.br;thexpress;totem;vipipcc.claro.com.br;webportal.nowonline.com.br;websan.claro.com.br;*wppnacional.claro.com.br;auto-controle;microcredito.claro.com.br;*.grupoaec.com.br;*.grupoaec.local;*.corp.clarobr;*clarosgvas.mobicare.com.br*;*.ilk.*;updateasc.netservicos.*;*esrccenter*;nmcol.*;claroclube*;sgd*;chat.claro*;mapacobertura*;*.cyf.*;hotptb*;eforce*;ipc.claro.com.br;ipchml.claro.com.br;*.duosecurity.com;vendasapp.*;authvendasapp.*;*parc.claro.com.br;*ativacaohomolmfa*;clarospa.cloud.com;*.cloud.com;*.citrixdata.com;<local>"
+				Write-Host " Configuração concluída!" -ForegroundColor Green
+				return
+			}
+
+			$manualValues = Show-ProxyForm `
+				-CurrentProxyEnable $currentProxyEnable `
+				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
+				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+
+			if ($null -eq $manualValues) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+		[pscustomobject]@{
+		Nome = "Ajusta Host"
+		Acao = {
+			$operacoes = @("AIR", "CPV", "PDI")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host " Erro" -ForegroundColor Red
+				return
+			}
+
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+
+			switch ($operacao) {
+				"AIR" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*" -Destination "$publicDesktop" -Force }
+				"PDI" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*" -Destination "$publicDesktop" -Force }
+				"CPV" { Copy-Item "\\camila3.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_ClaroEbt\*" -Destination "$publicDesktop" -Force }
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
 		}
 	}
 )
@@ -707,6 +798,82 @@ $scriptsOi = @(
 			Write-Host " Configurações específicas para a Oi..." -ForegroundColor Cyan
 			Write-Host " Esta opção é um placeholder para futuras configurações específicas da Oi." -ForegroundColor Yellow
 			Write-Host " Nenhuma ação foi implementada ainda." -ForegroundColor Yellow
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Atalhos"
+		Acao = {
+			if (-not (Get-SSCredential)) { return } 
+
+			$operacoes = @("CPV", "JRE")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host " Erro" -ForegroundColor Red
+				return
+			}
+
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			Remove-FSItem -Path "$userDir\Desktop\*"
+
+			switch ($operacao) {
+				"JRE" { Copy-Item "\\calais.grupoaec.com.br\script_oi.$\Lnk_Desktop_Bko\*" -Destination "$publicDesktop" -Force }
+				"CPV" { Copy-Item "\\camila2.grupoaec.com.br\script_oi.$\Segmentos\Oi_Total_BackOffice\Lnk_Desktop\*" -Destination "$publicDesktop" -Force }
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Proxy Oi/Nio"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+			if (-not (Test-Path $proxyRegPath)) {
+				New-Item -Path $proxyRegPath -Force | Out-Null
+			}
+			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
+			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
+			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
+
+			$proxyModeOptions = @("Automático", "Manual")
+			$proxyModeChoice = $null
+			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy TIM:"
+
+			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Configurando proxy para a Oi/Nio..." -ForegroundColor Cyan
+
+			if ($proxyModeChoice -eq "Automático") {
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.134:8080"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "*.interno.srv.br;192.168.*;10.32.208.*;10.*;*.telemar;arsweb;oiatendeintegracao;minhaaec;minhaaec.grupoaec.com.br;*.intranet;oisistemas.extranet;sfa.oi.net.br;oilegal;saspx15m.brasiltelecom.com.br;*.grupoaec.com.br;*.grupoaec.local;*.local.srv.br;oisistemas.oi.net.br;*.interno.srv.br;spaceplanning-dev.azure-devices.net;*.gcp.nio;nioaplicacoes.niointernet.app.br;elroy.apps.ocpoi.oi.intranet;logincorp.local.srv.br;<local>"
+				Write-Host " Configuração concluída!" -ForegroundColor Green
+				return
+			}
+
+			$manualValues = Show-ProxyForm `
+				-CurrentProxyEnable $currentProxyEnable `
+				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
+				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+
+			if ($null -eq $manualValues) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+
+			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
 )
@@ -888,6 +1055,34 @@ $scriptsTim = @(
 			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
 
 			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Atalhos"
+		Acao = {
+			if (-not (Get-SSCredential)) { return } 
+
+			$operacoes = @("MOC", "ORI", "RJO")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host " Erro" -ForegroundColor Red
+				return
+			}
+
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			Remove-FSItem -Path "$userDir\Desktop\*"
+
+			switch ($operacao) {
+				"MOC" { Copy-Item "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*" -Destination "$publicDesktop" -Force }
+				"ORI" { Copy-Item "\\mercurio-vm2\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*" -Destination "$publicDesktop" -Force }
+				"RJO" { Copy-Item "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*" -Destination "$publicDesktop" -Force }
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
 		}
 	}
 )
