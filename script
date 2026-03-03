@@ -450,13 +450,37 @@ $scriptsGeral = @(
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Limpar arquivos temporários"
+		Nome = "Limpar Cache"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
-			Write-Host " Limpando arquivos temporários..." -ForegroundColor Cyan
-			Remove-FSItem -Path "C:\Windows\Temp\*"
-			Remove-FSItem -Path "$env:Temp\*"
-			Write-Host " Concluído!" -ForegroundColor Green
+			Stop-Process -Name chrome*, msedge*, iexplore*, concentr*, receiver*, redirector*, radeobj*, wfcrun32*, wfica32*, pnamain* -Force -ErrorAction SilentlyContinue
+
+			RunDll32.exe inetcpl.cpl,ClearMyTracksByProcess 255
+
+			function Clear-Folder($path) {
+				if (Test-Path $path) {
+					Remove-Item "$path\*" -Force -Recurse -ErrorAction SilentlyContinue
+				}
+			}
+
+			$user = Get-ActiveUser
+			$userPath = "C:\Users\$user"
+
+			$folders = @(
+				"$userPath\AppData\Local\Temp",
+				"$userPath\AppData\Local\Google\Chrome\User Data",
+				"$userPath\AppData\Local\Microsoft\Edge\User Data",
+				"$userPath\AppData\Local\Microsoft\Terminal Server Client\Cache",
+				"$userPath\AppData\Local\Citrix",
+				"$userPath\AppData\Roaming\ICAClient",
+				"$env:SystemRoot\Temp",
+				"$env:SystemDrive\Temp"
+			)
+
+			foreach ($f in $folders) { Clear-Folder $f }
+
+			Write-Host "Limpeza concluída."
+			Pause
 		}
 	}
 	[pscustomobject]@{
@@ -498,6 +522,8 @@ Add-Type -TypeDefinition @"
                     100,
                     [ref]$result
                 )
+				Stop-Process -Name explorer.exe -ErrorAction SilentlyContinue
+				Start-Process explorer.exe -ErrorAction SilentlyContinue
             }
 
 			Stop-Process -Name Widgets -ErrorAction SilentlyContinue
@@ -542,7 +568,9 @@ Add-Type -TypeDefinition @"
 				"Microsoft.XboxSpeechToTextOverlay",
 				"Microsoft.GamingApp",
 				"Microsoft.Xbox.TCUI",
-				"Microsoft.XboxGamingOverlay"
+				"Microsoft.XboxGamingOverlay",
+				"MicrosoftWindows.Client.WebExperience", 
+				"Microsoft.OneDrive"
 			) | ForEach-Object {
 				Get-AppxPackage -AllUsers $_ | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 			}
@@ -556,6 +584,103 @@ Add-Type -TypeDefinition @"
 			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "AppsUseLightTheme" -Type "DWord" -Value 1
 			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "SystemUsesLightTheme" -Type "DWord" -Value 0
 			Update-ExplorerColors
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Desbloquear Navegadores"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Google\Chrome" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
+
+			Stop-Process -Name chrome*, msedge* -Force -ErrorAction SilentlyContinue
+			Write-Host " Configurações de navegador resetadas." -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta ToLogado"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }
+
+			$dominio = "grupoaec.com.br"
+			$servers = "MOC","AIR","CPV","MRO","RJO","ORI"
+
+			$selectedSite = $null
+			Select-FromMenu -Options $servers -OutputVariable ([ref]$selectedSite) -Prompt "Selecione o site:"
+
+			if (!$selectedSite) { 
+				Write-Host " Nenhum servidor selecionado. Operação cancelada." -ForegroundColor Yellow		
+				return
+			}
+
+			Write-Host " Configurando ToLogado $selectedSite" -ForegroundColor Cyan
+			Write-Host ""
+
+			Write-Host " Validando conexão com a rede interna..." -ForegroundColor Cyan
+			Write-Host ""
+			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
+			if (-not $testMinhaAec) {
+				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
+				Set-DnsClientGlobalSetting -SuffixSearchList @($dominio)
+				Start-Sleep -Seconds 2
+
+				if (-not $testMinhaAec) {
+					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
+					return
+				}
+			}
+
+			if (-not (Test-Connection "192.168.88.8" -Count 2 -Quiet) -and
+			    -not (Test-Connection "$dominio" -Count 2 -Quiet)) {
+				Write-Host " Não há conexão com o servidor interno ($dominio)." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
+			Write-Host ""
+			$servers = "DGT_PUBL_$selectedSite", "AZURE-SRV01"
+
+			$bestServer = $servers | ForEach-Object {
+				try {
+					$pingResult = Test-Connection $_ -Count 2 -ErrorAction Stop | Measure-Object ResponseTime -Average
+					if ($pingResult) {
+						$r = $pingResult.Average
+						[PSCustomObject]@{Server=$_; Latency=$r}
+					}
+				} catch {}
+			} | Sort-Object Latency | Select-Object -First 1
+
+            if ($bestServer -and $bestServer.Server -ne "AZURE-SRV01") {
+                $tologadoPath = "\\$($bestServer.Server)\to_logado.$\Squirrel\setup.exe"
+            } else {
+                $tologadoPath = "\\AZURE-SRV01\tologado_ho.$\Squirrel\setup.exe"
+            }
+
+			Write-Host (" Servidor selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
+            
+			Get-Process aec*,self*,setup*,chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+			$user = Get-ActiveUser
+
+			Write-Host " Preparando arquivos..." -ForegroundColor Cyan
+            Remove-Item "C:\aec\setup.exe" -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Users\$user\Desktop\tô logado*" -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Users\$user\AppData\Local\ToLogado*" -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
+            New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
+            Copy-Item $tologadoPath "C:\AEC\Setup_ToLogado.exe" -Force
+
+			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut("C:\Users\$user\Desktop\Setup_ToLogado.lnk")
+            $Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
+            $Shortcut.Save()
+			
+			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
+			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
 )
@@ -713,90 +838,6 @@ $scriptsTim = @(
 
 			Write-Host " Configurando CallControl para o PIN $pin..." -ForegroundColor Cyan
 			Edit-Reg -Action "Create" -Path "HKCU:\Environment" -Name "AgentID" -Type "String" -Value "$pin" | Out-Null
-			Write-Host " Configuração concluída!" -ForegroundColor Green
-		}
-	}
-	[pscustomobject]@{
-		Nome = "Ajusta ToLogado"
-		Acao = {
-			if (-not (Get-SSCredential)) { return }
-
-			$dominio = "grupoaec.com.br"
-			$servers = "MOC","AIR","CPV","MRO","RJO","ORI"
-
-			$selectedSite = $null
-			Select-FromMenu -Options $servers -OutputVariable ([ref]$selectedSite) -Prompt "Selecione o site:"
-
-			if (!$selectedSite) { 
-				Write-Host " Nenhum servidor selecionado. Operação cancelada." -ForegroundColor Yellow		
-				return
-			}
-
-			Write-Host " Configurando ToLogado $selectedSite" -ForegroundColor Cyan
-			Write-Host ""
-
-			Write-Host " Validando conexão com a rede interna..." -ForegroundColor Cyan
-			Write-Host ""
-			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
-			if (-not $testMinhaAec) {
-				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
-				Set-DnsClientGlobalSetting -SuffixSearchList @($dominio)
-				Start-Sleep -Seconds 2
-
-				if (-not $testMinhaAec) {
-					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
-					return
-				}
-			}
-
-			if (-not (Test-Connection "192.168.88.8" -Count 2 -Quiet) -and
-			    -not (Test-Connection "$dominio" -Count 2 -Quiet)) {
-				Write-Host " Não há conexão com o servidor interno ($dominio)." -ForegroundColor Yellow
-				return
-			}
-
-			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
-			Write-Host ""
-			$servers = "DGT_PUBL_$selectedSite", "AZURE-SRV01"
-
-			$bestServer = $servers | ForEach-Object {
-				try {
-					$pingResult = Test-Connection $_ -Count 2 -ErrorAction Stop | Measure-Object ResponseTime -Average
-					if ($pingResult) {
-						$r = $pingResult.Average
-						[PSCustomObject]@{Server=$_; Latency=$r}
-					}
-				} catch {}
-			} | Sort-Object Latency | Select-Object -First 1
-
-            if ($bestServer -and $bestServer.Server -ne "AZURE-SRV01") {
-                $tologadoPath = "\\$($bestServer.Server)\to_logado.$\Squirrel\setup.exe"
-            } else {
-                $tologadoPath = "\\AZURE-SRV01\tologado_ho.$\Squirrel\setup.exe"
-            }
-
-			Write-Host (" Servidor selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
-            
-			Get-Process aec*,self*,setup*,chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-			$user = Get-ActiveUser
-
-			Write-Host " Preparando arquivos..." -ForegroundColor Cyan
-            Remove-Item "C:\aec\setup.exe" -Force -ErrorAction SilentlyContinue
-            Remove-Item "C:\Users\$user\Desktop\tô logado*" -Force -ErrorAction SilentlyContinue
-            Remove-Item "C:\Users\$user\AppData\Local\ToLogado*" -Force -ErrorAction SilentlyContinue
-
-			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
-            New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
-            Copy-Item $tologadoPath "C:\AEC\Setup_ToLogado.exe" -Force
-
-			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
-            $WshShell = New-Object -ComObject WScript.Shell
-            $Shortcut = $WshShell.CreateShortcut("C:\Users\$user\Desktop\Setup_ToLogado.lnk")
-            $Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
-            $Shortcut.Save()
-			
-			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
