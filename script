@@ -210,6 +210,54 @@ function Remove-FSItem {
 	}
 }
 
+function Test-NetworkPathAccess {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path
+	)
+
+	if ($Path -notlike '\\*') {
+		return $true
+	}
+
+	$pathToCheck = $Path
+	if ($pathToCheck -like '*`**') {
+		$pathToCheck = Split-Path -Path $pathToCheck -Parent
+	}
+
+	if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) {
+		Write-Host "Sem acesso ao caminho de rede interna"
+		return $false
+	}
+
+	return $true
+}
+
+function Copy-ItemSafe {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path,
+		[Parameter(Mandatory=$true)][string]$Destination
+	)
+
+	if (-not (Test-NetworkPathAccess -Path $Path)) {
+		return $false
+	}
+
+	Copy-Item -Path $Path -Destination $Destination -Force -ErrorAction SilentlyContinue
+	return $true
+}
+
+function Invoke-WebRequestSafe {
+	param(
+		[Parameter(Mandatory=$true)][string]$Uri
+	)
+
+	if (-not (Test-NetworkPathAccess -Path $Uri)) {
+		return $null
+	}
+
+	return Invoke-WebRequest -Uri $Uri -UseBasicParsing -ErrorAction SilentlyContinue
+}
+
 function Select-FromMenu {
 	param(
 		[Parameter(Mandatory=$true)][array]$Options,
@@ -385,7 +433,10 @@ function Search-RamalPinTim {
 		[Parameter(Mandatory=$true)][string]$LookupValue
 	)
 
-	$resp = (Invoke-WebRequest -Uri "\\romulo\script_tim.$\Ramal_TIM\RamalP.txt" -UseBasicParsing -ErrorAction SilentlyContinue).RawContent
+	$ramalPath = "\\romulo.grupoaec.com.br\script_tim.$\Ramal_TIM\RamalP.txt"
+	$webResponse = Invoke-WebRequestSafe -Uri $ramalPath
+	if ($null -eq $webResponse) { return $null }
+	$resp = $webResponse.RawContent
 	Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
 
 	$lookupNormalized = $LookupValue.Trim()
@@ -437,6 +488,7 @@ $scriptsGeral = @(
 			if (-not (Get-SSCredential)) { return }	
 			Write-Host " Ajustando permissões de administrador..." -ForegroundColor Cyan
 			Write-Host " Esta configuração não é eficaz em todos os sistemas pois não sobrepõe as políticas de grupo locais ou de domínio." -ForegroundColor Yellow
+			
 			Edit-Reg -Action "Remove" -Path "ADM:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
             Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
             Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Target "Item" 
@@ -454,9 +506,12 @@ $scriptsGeral = @(
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
 			Stop-Process -Name chrome*, msedge*, iexplore*, concentr*, receiver*, redirector*, radeobj*, wfcrun32*, wfica32*, pnamain* -Force -ErrorAction SilentlyContinue
-
 			RunDll32.exe inetcpl.cpl,ClearMyTracksByProcess 255
 
+			$user = Get-ActiveUser
+			$userDir = "C:\Users\$user"
+
+			Remove-FSItem -Path "$userDir\AppData\Local\Apps\2.0"
 			function Clear-Folder($path) {
 				if (Test-Path $path) {
 					Remove-Item "$path\*" -Force -Recurse -ErrorAction SilentlyContinue
@@ -484,7 +539,7 @@ $scriptsGeral = @(
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Win10▼ > Win11▲"
+		Nome = "Win10 > Win11"
 		Acao = {
 			
 			Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
@@ -675,7 +730,7 @@ Add-Type -TypeDefinition @"
 
 			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
             New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
-            Copy-Item $tologadoPath "C:\AEC\Setup_ToLogado.exe" -Force
+			if (-not (Copy-ItemSafe -Path $tologadoPath -Destination "C:\AEC\Setup_ToLogado.exe")) { return }
 
 			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
             $WshShell = New-Object -ComObject WScript.Shell
@@ -687,6 +742,203 @@ Add-Type -TypeDefinition @"
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
+	[PSCustomObject]@{
+		Nome = "Desinstalar Chrome"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Stop-Process -Name "chrome*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "Google*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "setup*" -Force -ErrorAction SilentlyContinue
+
+			wmic product where "name like 'Google Chrome%%'" call uninstall /nointeractive | Out-Null
+
+			if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
+				$chrome64ver = (wmic datafile where "name='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				& "C:\Program Files\Google\Chrome\Application\$chrome64ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
+				Remove-Item "C:\Program Files\Google" -Recurse -Force
+			}
+
+			if (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
+				$chrome86ver = (wmic datafile where "name='C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				& "C:\Program Files (x86)\Google\Chrome\Application\$chrome86ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
+				Remove-Item "C:\Program Files (x86)\Google" -Recurse -Force
+			}
+
+			Start-Sleep -Seconds 5
+
+			if (-not (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe")) {
+				if (-not (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")) {
+					Write-Host " Google Chrome desinstalado com sucesso." -ForegroundColor Green
+				} else {
+					Remove-Item "C:\Program Files (x86)\Google\Chrome" -Recurse -Force
+					Start-Sleep -Seconds 5
+				}
+			} else {
+				Start-Sleep -Seconds 5
+			}
+
+			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Ajustar Hora"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Set-Service -Name w32time -StartupType Automatic
+			Start-Service w32time
+
+			w32tm /config /manualpeerlist:"time.google.com" /syncfromflags:manual /reliable:YES /update
+
+			w32tm /resync
+
+			schtasks /create /tn "Sincronizar Hora com Internet" /tr "w32tm /resync" /sc onevent /ec System /mo "*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and (EventID=10000)]]" /ru SYSTEM /rl HIGHEST
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Desabilitar Serviços Kace/Sysmain"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Stop-Service -Name "konea" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "konea" -StartupType Disabled
+
+			Stop-Service -Name "OfflineScheduler" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "OfflineScheduler" -StartupType Disabled
+
+			Stop-Service -Name "AMPWatchDog" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "AMPWatchDog" -StartupType Disabled
+
+			Stop-Service -Name "AMPAgent" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "AMPAgent" -StartupType Disabled
+
+			Stop-Service -Name "sysmain" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "sysmain" -StartupType Disabled
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Modo Internet Explorer"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			Write-Host " Configurando Modo Internet Explorer no Microsoft Edge..." -ForegroundColor Cyan
+			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationLevel" -Type "DWord" -Value 1
+			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationTestingAllowed" -Type "DWord" -Value 1
+
+			Write-Host " Criando XML de sites em C:\edge_iemode..." -ForegroundColor Cyan
+			$folder = "C:\edge_iemode"
+			if (-not (Test-Path $folder)) {
+				New-Item -ItemType Directory -Path $folder | Out-Null
+			}
+
+			$xmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<site-list version="1">
+<site url="http://olimpia2/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://olimpia2/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://www1.centralnacionalunimed.com.br/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://www.cpandl.com/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://nicedbpappes1/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://nicedbpappes1/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://niceengage/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://niceengage.internal.timbrasil.com.br/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://niceengage.internal.timbrasil.com.br/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://vilas3/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://vilas3/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+</site-list>
+"@
+
+			$xmlPath = "C:\edge_iemode\iemode.xml"
+			$xmlContent | Set-Content -Path $xmlPath -Encoding UTF8
+
+			Write-Host " Ajustando registros do Microsoft Edge..." -ForegroundColor Cyan
+
+			$siteListUri = "file:///C:/edge_iemode/iemode.xml"
+			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationSiteList" -Type "String" -Value $siteListUri
+
+			Stop-Process -Name msedge* -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Atualizando políticas de grupo..." -ForegroundColor Cyan
+			gpupdate /force | Out-Null
+
+			function New-EdgeShortcut {
+				param(
+					[string]$Name,
+					[string]$Url
+				)
+				$shortcutPath = "$env:PUBLIC\Desktop\$Name.lnk"
+				$edgeExe = if (Test-Path "C:\Program Files\Microsoft\Edge\Application\msedge.exe") {
+					"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+				} else {
+					"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+				}
+				$WshShell = New-Object -ComObject WScript.Shell	
+				$Shortcut = $WshShell.CreateShortcut($shortcutPath)
+				$Shortcut.TargetPath = $edgeExe
+				$Shortcut.Arguments = $Url
+				$Shortcut.WorkingDirectory = Split-Path -Path $edgeExe -Parent
+				$Shortcut.Save()
+			}
+
+			$atalho = $null		
+			Select-FromMenu -Options @("Nice Engage", "Nice DBAppES1", "Nice Oimpia2", "Nice Vilas3", "TOP V8") -OutputVariable ([ref]$atalho) -Prompt " Selecione o atalho a ser criado:"
+			
+			switch ($atalho) {
+				"Nice Engage" { 
+					New-EdgeShortcut -Name "Nice Engage" -Url "https://niceengage.internal.timbrasil.com.br/Nice/"
+				}
+				"Nice DBAppES1" {
+					New-EdgeShortcut -Name "Nice DBAppES1" -Url "http://nicedbpappes1/Nice/"
+				}
+				"Nice Oimpia2" {
+					New-EdgeShortcut -Name "Nice Oimpia2" -Url "http://olimpia2/Nice/"
+				}
+				"Nice Vilas3" {
+					New-EdgeShortcut -Name "Nice Vilas3" -Url "http://vilas3/Nice/"
+				}
+				"TOP V8" { 
+					New-EdgeShortcut -Name "TOP V8" -Url "https://www1.centralnacionalunimed.com.br/"
+				}
+				Default { Write-Host "Nenhum atalho criado." -ForegroundColor Yellow }
+			}
+
+			Write-Host "`nConfiguração de IE Mode aplicada com sucesso." -ForegroundColor Green
+			Write-Host "Verifique a lista em edge://compat/enterprise"
+		}
+	}
 )
 
 #------------------------------------Scripts Claro-----------------------------------
@@ -694,25 +946,36 @@ $scriptsClaro = @(
 	[pscustomobject]@{
 		Nome = "Ajusta Atalhos"
 		Acao = {
-			if (-not (Get-SSCredential)) { return }	
 			$operacoes = @("AIR", "CPV", "PDI")
 			$operacao = $null
 			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
-			
+
 			if ([string]::IsNullOrEmpty($operacao)) {
-				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				Write-Host " Erro" -ForegroundColor Red
 				return
 			}
 
-			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			Remove-FSItem -Path "$userDir\Desktop\*"
 
 			switch ($operacao) {
-				"AIR" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts" -Destination $hostsDir -Force }
-				"PDI" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts" -Destination $hostsDir -Force }
-				"CPV" { Copy-Item "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts" -Destination $hostsDir -Force }
+				"AIR" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"PDI" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_ClaroEbt\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
-
 		}
 	}
 	[pscustomobject]@{
@@ -764,42 +1027,58 @@ $scriptsClaro = @(
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
-		[pscustomobject]@{
+	[pscustomobject]@{
 		Nome = "Ajusta Host"
 		Acao = {
+			if (-not (Get-SSCredential)) { return }	
 			$operacoes = @("AIR", "CPV", "PDI")
 			$operacao = $null
 			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
-
+			
 			if ([string]::IsNullOrEmpty($operacao)) {
-				Write-Host " Erro" -ForegroundColor Red
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
 				return
 			}
 
-			$user = Get-ActiveUser
-			$userDir = "C:\users\$user\"
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
 
 			switch ($operacao) {
-				"AIR" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*" -Destination "$publicDesktop" -Force }
-				"PDI" { Copy-Item "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*" -Destination "$publicDesktop" -Force }
-				"CPV" { Copy-Item "\\camila3.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_ClaroEbt\*" -Destination "$publicDesktop" -Force }
+				"AIR" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"PDI" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
+		}
+	}
+	[PSCustomObject]@{
+		Name = "Corrige Serviços Duo"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			Stop-Process -Name "citrixenter*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "duo*" -Force -ErrorAction SilentlyContinue
+
+			Start-Service -Name "DuoDesktopUpdateService" -ErrorAction SilentlyContinue
+			Start-Service -Name "DuoSecurityService" -ErrorAction SilentlyContinue
+			Start-Service -Name "DuoCryptoService" -ErrorAction SilentlyContinue
+			Start-Service -Name "DuoTrustedPeerMessageBrokerService" -ErrorAction SilentlyContinue
+
+			Start-Process "C:\Program Files (x86)\Duo Desktop\Duo Desktop.exe" -ErrorAction SilentlyContinue
 		}
 	}
 )
 
 #--------------------------------------Scripts Oi------------------------------------
 $scriptsOi = @(
-	[pscustomobject]@{
-		Nome = "Configurações Oi"
-		Acao = {
-			if (-not (Get-SSCredential)) { return }	
-			Write-Host " Configurações específicas para a Oi..." -ForegroundColor Cyan
-			Write-Host " Esta opção é um placeholder para futuras configurações específicas da Oi." -ForegroundColor Yellow
-			Write-Host " Nenhuma ação foi implementada ainda." -ForegroundColor Yellow
-		}
-	}
 	[pscustomobject]@{
 		Nome = "Ajusta Atalhos"
 		Acao = {
@@ -821,8 +1100,14 @@ $scriptsOi = @(
 			Remove-FSItem -Path "$userDir\Desktop\*"
 
 			switch ($operacao) {
-				"JRE" { Copy-Item "\\calais.grupoaec.com.br\script_oi.$\Lnk_Desktop_Bko\*" -Destination "$publicDesktop" -Force }
-				"CPV" { Copy-Item "\\camila2.grupoaec.com.br\script_oi.$\Segmentos\Oi_Total_BackOffice\Lnk_Desktop\*" -Destination "$publicDesktop" -Force }
+				"JRE" {
+					$networkPath = "\\calais.grupoaec.com.br\script_oi.$\Lnk_Desktop_Bko\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila2.grupoaec.com.br\script_oi.$\Segmentos\Oi_Total_BackOffice\Lnk_Desktop\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
 		}
@@ -876,6 +1161,39 @@ $scriptsOi = @(
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
+	#-----------------------------------------------------------------------------------------Ajustar
+	[pscustomobject]@{
+		Nome = "Ajusta Host"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			$operacoes = @("AIR", "CPV", "PDI")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+			
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				return
+			}
+
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
+
+			switch ($operacao) {
+				"AIR" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"PDI" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
 )
 
 #--------------------------------------Scripts TIM-----------------------------------
@@ -892,7 +1210,6 @@ $scriptsTim = @(
             Write-Host " Finalizado!" -ForegroundColor Green
         }
     }
-
 	[pscustomobject]@{
 		Nome = "Configura Cisco"
 		Acao = {
@@ -957,8 +1274,7 @@ $scriptsTim = @(
 			}
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
-	}
-	
+	}	
 	[pscustomobject]@{
 		Nome = "Configura CallControl"
 		Acao = {
@@ -1078,9 +1394,51 @@ $scriptsTim = @(
 			Remove-FSItem -Path "$userDir\Desktop\*"
 
 			switch ($operacao) {
-				"MOC" { Copy-Item "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*" -Destination "$publicDesktop" -Force }
-				"ORI" { Copy-Item "\\mercurio-vm2\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*" -Destination "$publicDesktop" -Force }
-				"RJO" { Copy-Item "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*" -Destination "$publicDesktop" -Force }
+				"MOC" {
+					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"ORI" {
+					$networkPath = "\\mercurio-vm2.grupoaec.com.br\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"RJO" {
+					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+	#-----------------------------------------------------------------------------------------Ajustar
+	[pscustomobject]@{
+		Nome = "Ajusta Host"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			$operacoes = @("AIR", "CPV", "PDI")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+			
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				return
+			}
+
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
+
+			switch ($operacao) {
+				"AIR" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"PDI" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
 		}
