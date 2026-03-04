@@ -682,19 +682,14 @@ Add-Type -TypeDefinition @"
 			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
 			if (-not $testMinhaAec) {
 				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
-				Set-DnsClientGlobalSetting -SuffixSearchList @($dominio)
+				reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v SearchList /t REG_SZ /d grupoaec.com.br /f
+				ipconfig /registerdns
 				Start-Sleep -Seconds 2
 
 				if (-not $testMinhaAec) {
 					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
 					return
 				}
-			}
-
-			if (-not (Test-Connection "192.168.88.8" -Count 2 -Quiet) -and
-			    -not (Test-Connection "$dominio" -Count 2 -Quiet)) {
-				Write-Host " Não há conexão com o servidor interno ($dominio)." -ForegroundColor Yellow
-				return
 			}
 
 			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
@@ -960,7 +955,21 @@ $scriptsClaro = @(
 			$userDir = "C:\users\$user\"
 			$publicDesktop = "$env:PUBLIC\Desktop"
 
-			Remove-FSItem -Path "$userDir\Desktop\*"
+			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
+
+			if (!(Test-Path $teamViewerPath)) {
+				$teamViewerPath = "${env:ProgramFiles(x86)}\TeamViewer\TeamViewer.exe"
+			}
+
+			if (Test-Path $teamViewerPath) {
+				$WshShell = New-Object -ComObject WScript.Shell
+				$Shortcut = $WshShell.CreateShortcut("$publicDesktop\TeamViewer.lnk")
+
+				$Shortcut.TargetPath = $teamViewerPath
+				$Shortcut.WorkingDirectory = Split-Path $teamViewerPath
+				$Shortcut.IconLocation = $teamViewerPath
+				$Shortcut.Save()
+			}
 
 			switch ($operacao) {
 				"AIR" {
@@ -1381,6 +1390,23 @@ $scriptsOi = @(
 			$publicDesktop = "$env:PUBLIC\Desktop"
 
 			Remove-FSItem -Path "$userDir\Desktop\*"
+			Remove-FSItem -Path "$publicDesktop\*"
+			
+			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
+
+			if (!(Test-Path $teamViewerPath)) {
+				$teamViewerPath = "${env:ProgramFiles(x86)}\TeamViewer\TeamViewer.exe"
+			}
+
+			if (Test-Path $teamViewerPath) {
+				$WshShell = New-Object -ComObject WScript.Shell
+				$Shortcut = $WshShell.CreateShortcut("$publicDesktop\TeamViewer.lnk")
+
+				$Shortcut.TargetPath = $teamViewerPath
+				$Shortcut.WorkingDirectory = Split-Path $teamViewerPath
+				$Shortcut.IconLocation = $teamViewerPath
+				$Shortcut.Save()
+			}
 
 			switch ($operacao) {
 				"JRE" {
@@ -1670,6 +1696,23 @@ $scriptsTim = @(
 			$publicDesktop = "$env:PUBLIC\Desktop"
 
 			Remove-FSItem -Path "$userDir\Desktop\*"
+            Remove-FSItem -Path "$publicDesktop\*"
+			
+			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
+
+			if (!(Test-Path $teamViewerPath)) {
+				$teamViewerPath = "${env:ProgramFiles(x86)}\TeamViewer\TeamViewer.exe"
+			}
+
+			if (Test-Path $teamViewerPath) {
+				$WshShell = New-Object -ComObject WScript.Shell
+				$Shortcut = $WshShell.CreateShortcut("$publicDesktop\TeamViewer.lnk")
+
+				$Shortcut.TargetPath = $teamViewerPath
+				$Shortcut.WorkingDirectory = Split-Path $teamViewerPath
+				$Shortcut.IconLocation = $teamViewerPath
+				$Shortcut.Save()
+			}
 
 			switch ($operacao) {
 				"MOC" {
