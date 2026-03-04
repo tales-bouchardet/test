@@ -1,44 +1,1732 @@
-taskkill /f /im team* /im tv*
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 
-Get-Package -Name "TeamViewer*" -ErrorAction SilentlyContinue |
-    Uninstall-Package -Force -ErrorAction SilentlyContinue
+function Get-SSCredential {
+    $storedHash = "ad43282ea5d872ed9fdb3306e75ed712286a6478c597a05e4bb5ad2eb0d1c70f"
 
-Remove-Item "HKLM:\SOFTWARE\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "HKLM:\SOFTWARE\WOW6432Node\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
+    $inputSecure = Read-Host "Senha" -AsSecureString
+    $inputPlain  = [System.Net.NetworkCredential]::new("", $inputSecure).Password
 
-if (Test-Path "C:\Program Files\TeamViewer\uninstall.exe") {
-    & "C:\Program Files\TeamViewer\uninstall.exe" /S
-}
-if (Test-Path "C:\Program Files (x86)\TeamViewer\uninstall.exe") {
-    & "C:\Program Files (x86)\TeamViewer\uninstall.exe" /S
-}
+    $sha256 = New-Object System.Security.Cryptography.SHA256Managed
+    $inputHash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($inputPlain))
+    $inputHashHex = -join ($inputHash | ForEach-Object { $_.ToString("x2") })
 
-Start-Sleep 20
-
-Remove-Item "C:\Program Files\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "C:\Program Files (x86)\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
-
-Get-ChildItem Registry::HKEY_USERS | ForEach-Object {
-    Remove-Item "Registry::$($_.Name)\Software\TeamViewer" -Recurse -Force -ErrorAction SilentlyContinue
+    if ($storedHash -eq $inputHashHex) {
+        return $true
+    } else {
+        Write-Host "Senha incorreta. Ação cancelada." -ForegroundColor Red
+        return $false
+    }
 }
 
-reg.exe import "$PSScriptRoot\TeamViewer_Settings.reg"
-
-Start-Process msiexec.exe -Wait -ArgumentList "/i `"$PSScriptRoot\TeamViewer_Host.msi`" /qb! SETTINGSFILE=`"$PSScriptRoot\TeamViewer_Settings.tvopt`""
-
-if (-not (Get-Process TeamViewerQS -ErrorAction SilentlyContinue)) {
-    & "$PSScriptRoot\TeamViewerQS.exe" /S
+function Get-ActiveUser {
+	$rawUser = (query user | Select-String 'Ativo|Active' | ForEach-Object { ($_ -split '\s+')[0] })
+	return $rawUser.TrimStart('>')
 }
 
-if (Test-Path "C:\Program Files\TeamViewer\TeamViewer.exe") {
-    Get-ChildItem C:\Users -Directory | ForEach-Object {
-        Remove-Item "$($_.FullName)\Desktop\TeamVi*" -Recurse -Force -ErrorAction SilentlyContinue
+function Get-ActiveUserSid {
+	$user = Get-ActiveUser
+	return (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | Where-Object { $_.ProfileImagePath -eq "C:\Users\$user" }).PSChildName
+}
+
+function Edit-Reg {
+	param(
+		[Parameter(Mandatory=$false)][ValidateSet("Create","Remove")][string]$Action = "Create",
+		[Parameter(Mandatory=$true)][string]$Path,
+		[Parameter(Mandatory=$false)][ValidateSet("Item","Property")][string]$Target = "Property",
+		[Parameter(Mandatory=$false)][Alias("Name")][string]$PName,
+		[Parameter(Mandatory=$false)][ValidateSet("DWord","String")][string]$Type,
+		[Parameter(Mandatory=$false)]$Value
+	)
+				
+	$sid = Get-ActiveUserSid
+	
+	if ($Path -like 'HKCU:\*') {
+		$regPath = $Path -replace 'HKCU:', "Registry::HKEY_USERS\$sid"
+
+	}
+	elseif ($Path -like 'ADM:\*') {
+		$regPath = $Path -replace '^ADM:', "HKCU:"
+	}
+	else {
+		$regPath = $Path
+	}
+
+	
+	if ($Action -eq "Remove") {
+		try {
+			if ($Target -eq "Item") {
+				Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
+			} else {
+				Remove-ItemProperty -Path $regPath -Name $PName -ErrorAction SilentlyContinue
+			}
+		} catch {
+			Write-Host ("Erro ao remover a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+		}
+		return
+	}
+	
+	if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+	if ($Target -ne "Property") { return }
+	try {
+		if ($Type -eq "DWord") {
+			New-ItemProperty -Path $regPath -Name $PName -Value ([int]$Value) -PropertyType DWord -Force | Out-Null
+		} else {
+			New-ItemProperty -Path $regPath -Name $PName -Value ([string]$Value) -PropertyType String -Force | Out-Null
+		}
+	} catch {
+		Write-Host ("Erro ao criar/editar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+	}
+}
+
+function Search-Reg {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path,
+		[Parameter(Mandatory=$false)][Alias("Name")][string]$PName
+	)
+
+	$sid = Get-ActiveUserSid
+
+	$regPath = if ($Path -like 'HKCU:\*') {
+		$Path -replace '^HKCU:', "Registry::HKEY_USERS\$sid"
+	} elseif ($Path -like 'HKCU:\*') {
+		$Path -replace '^HKCU:', "Registry::HKEY_USERS\$sid"
+	} elseif ($Path -like 'ADM:\*') {
+		$Path -replace '^ADM:', "HKCU:"
+	} else {
+		$Path
+	}
+
+	if (-not (Test-Path $regPath)) { return $null }
+
+	try {
+		if ([string]::IsNullOrEmpty($PName)) {
+			return Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+		}
+
+		$propertyBag = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+		if ($null -eq $propertyBag) { return $null }
+
+		return $propertyBag.$PName
+	} catch {
+		Write-Host ("Erro ao consultar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+		return $null
+	}
+}
+
+function Show-ProxyForm {
+    param(
+        $CurrentProxyEnable,
+        [string]$CurrentProxyServer,
+        [string]$CurrentProxyOverride
+    )
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object Windows.Forms.Form
+    $form.Text = "Proxy Form"
+    $form.Size = New-Object Drawing.Size(430,250)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    function Add-Field($label, $y, $text, $multiLine = $false, $height = 23) {
+        $lbl = New-Object Windows.Forms.Label
+        $lbl.Text = $label
+        $lbl.Location = New-Object Drawing.Point(10,$y)
+        $lbl.AutoSize = $true
+        $form.Controls.Add($lbl)
+
+        $txt = New-Object Windows.Forms.TextBox
+        $txt.Location = New-Object Drawing.Point(150,$y)
+        $txt.Size = New-Object Drawing.Size(250,$height)
+        $txt.Multiline = $multiLine
+        if ($multiLine) { $txt.ScrollBars = "Vertical" }
+        $txt.Text = $text
+        $form.Controls.Add($txt)
+
+        return $txt
     }
 
-    $wsh = New-Object -ComObject WScript.Shell
-    $sc = $wsh.CreateShortcut("C:\Users\Public\Desktop\TeamViewer.lnk")
-    $sc.TargetPath = "C:\Program Files\TeamViewer\TeamViewer.exe"
-    $sc.Save()
+    $chkEnable = New-Object Windows.Forms.CheckBox
+    $chkEnable.Text = "Habilitar Proxy"
+    $chkEnable.Location = New-Object Drawing.Point(10,20)
+    $chkEnable.AutoSize = $true
+    $chkEnable.Checked = ([int]$CurrentProxyEnable -eq 1)
+    $form.Controls.Add($chkEnable)
+
+    $txtServer   = Add-Field "ProxyServer:"   55  $CurrentProxyServer
+    $txtOverride = Add-Field "ProxyOverride:" 90  $CurrentProxyOverride $true 70
+
+    $txtServer.Enabled = $chkEnable.Checked
+
+    $chkEnable.Add_CheckedChanged({
+        $txtServer.Enabled = $chkEnable.Checked
+    })
+
+    # Botões levemente mais abaixo
+    $btnOk = New-Object Windows.Forms.Button
+    $btnOk.Text = "Salvar"
+    $btnOk.Size = New-Object Drawing.Size(75,28)
+    $btnOk.Location = New-Object Drawing.Point(245,175)
+    $form.Controls.Add($btnOk)
+
+    $btnCancel = New-Object Windows.Forms.Button
+    $btnCancel.Text = "Cancelar"
+    $btnCancel.Size = New-Object Drawing.Size(75,28)
+    $btnCancel.Location = New-Object Drawing.Point(325,175)
+    $form.Controls.Add($btnCancel)
+
+    $btnOk.Add_Click({
+        $form.Tag = [pscustomobject]@{
+            ProxyEnable   = if ($chkEnable.Checked) { 1 } else { 0 }
+            ProxyServer   = $txtServer.Text.Trim()
+            ProxyOverride = $txtOverride.Text.Trim()
+        }
+
+        $form.DialogResult = "OK"
+        $form.Close()
+    })
+
+    $btnCancel.Add_Click({ $form.Close() })
+
+    if ($form.ShowDialog() -ne "OK") { return $null }
+    return $form.Tag
 }
+
+function Remove-FSItem {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path
+	)
+
+	try {
+		Remove-Item -Path $Path -Recurse -Force -ErrorAction SilentlyContinue
+	} catch {
+		Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+	}
+}
+
+function Test-NetworkPathAccess {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path
+	)
+
+	if ($Path -notlike '\\*') {
+		return $true
+	}
+
+	$pathToCheck = $Path
+	if ($pathToCheck -like '*`**') {
+		$pathToCheck = Split-Path -Path $pathToCheck -Parent
+	}
+
+	if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) {
+		Write-Host "Sem acesso ao caminho de rede interna"
+		return $false
+	}
+
+	return $true
+}
+
+function Copy-ItemSafe {
+	param(
+		[Parameter(Mandatory=$true)][string]$Path,
+		[Parameter(Mandatory=$true)][string]$Destination
+	)
+
+	if (-not (Test-NetworkPathAccess -Path $Path)) {
+		return $false
+	}
+
+	Copy-Item -Path $Path -Destination $Destination -Force -ErrorAction SilentlyContinue
+	return $true
+}
+
+function Invoke-WebRequestSafe {
+	param(
+		[Parameter(Mandatory=$true)][string]$Uri
+	)
+
+	if (-not (Test-NetworkPathAccess -Path $Uri)) {
+		return $null
+	}
+
+	return Invoke-WebRequest -Uri $Uri -UseBasicParsing -ErrorAction SilentlyContinue
+}
+
+function Select-FromMenu {
+	param(
+		[Parameter(Mandatory=$true)][array]$Options,
+		[Parameter(Mandatory=$true)][ref]$OutputVariable,
+		[Parameter(Mandatory=$true)][string]$Prompt
+	)
+
+	$selectedIndex = 0
+
+	function Write-OptionItem {
+		param(
+			[int]$Index,
+			[bool]$IsSelected,
+			[int]$TopLine
+		)
+
+		[Console]::SetCursorPosition(0, $TopLine + $Index)
+		$label = "  $($Options[$Index])"
+		$lineText = $label.PadRight([Math]::Max([Console]::WindowWidth - 1, $label.Length))
+		if ($IsSelected) {
+			Write-Host " > $lineText" -ForegroundColor Green -NoNewline
+		} else {
+			Write-Host "   $lineText" -ForegroundColor White -NoNewline
+		}
+	}
+
+	Clear-Host
+	Write-Host ""
+	Write-Host " $Prompt" -ForegroundColor Cyan
+	Write-Host ""
+	$menuTop = [Console]::CursorTop
+
+	for ($i = 0; $i -lt $Options.Count; $i++) {
+		Write-OptionItem -Index $i -IsSelected ($i -eq $selectedIndex) -TopLine $menuTop
+	}
+
+	[Console]::CursorVisible = $false
+	try {
+		:KeyLoop while ($true) {
+			$key = [Console]::ReadKey($true)
+			switch ($key.Key) {
+				"UpArrow" {
+					$previousIndex = $selectedIndex
+					if ($selectedIndex -gt 0) { $selectedIndex-- } else { $selectedIndex = $Options.Count - 1 }
+					Write-OptionItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+					Write-OptionItem -Index $selectedIndex -IsSelected $true -TopLine $menuTop
+				}
+				"DownArrow" {
+					$previousIndex = $selectedIndex
+					if ($selectedIndex -lt ($Options.Count - 1)) { $selectedIndex++ } else { $selectedIndex = 0 }
+					Write-OptionItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+					Write-OptionItem -Index $selectedIndex -IsSelected $true -TopLine $menuTop
+				}
+				"Enter" {
+					$OutputVariable.Value = $Options[$selectedIndex]
+					break KeyLoop
+				}
+				"Escape" {
+					break KeyLoop
+				}
+			}
+		}
+	} finally {
+		[Console]::CursorVisible = $true
+	}
+	Clear-Host
+}
+
+function Show-FirstMenu {
+	param(
+		[array]$Items,
+		[int]$SelectedIndex = 0,
+		[bool]$PauseAfterAction = $true,
+		[bool]$IsRootMenu = $false
+	)
+
+	function Write-MenuItem {
+		param(
+			[int]$Index,
+			[bool]$IsSelected,
+			[int]$TopLine
+		)
+
+		[Console]::SetCursorPosition(0, $TopLine + $Index)
+		$label = "  $($Items[$Index].Nome)"
+		$lineText = $label.PadRight([Math]::Max([Console]::WindowWidth - 1, $label.Length))
+		if ($IsSelected) {
+			Write-Host " > $lineText" -ForegroundColor Green -NoNewline
+		} else {
+			Write-Host "   $lineText" -ForegroundColor White -NoNewline
+		}
+	}
+
+	while ($true) {
+		Clear-Host
+		$escActionText = if ($IsRootMenu) { "sair" } else { "voltar" }
+		Write-Host ""
+		Write-Host (" ↑ e ↓ para navegar, Enter para executar, Esc para {0}." -f $escActionText) -ForegroundColor Cyan
+		Write-Host ""
+		$menuTop = [Console]::CursorTop
+
+		for ($i = 0; $i -lt $Items.Count; $i++) {
+			Write-MenuItem -Index $i -IsSelected ($i -eq $SelectedIndex) -TopLine $menuTop
+		}
+
+		[Console]::CursorVisible = $false
+		try {
+			:KeyLoop while ($true) {
+				$key = [Console]::ReadKey($true)
+				switch ($key.Key) {
+					"UpArrow" {
+						$previousIndex = $SelectedIndex
+						if ($SelectedIndex -gt 0) { $SelectedIndex-- } else { $SelectedIndex = $Items.Count - 1 }
+						Write-MenuItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+						Write-MenuItem -Index $SelectedIndex -IsSelected $true -TopLine $menuTop
+					}
+					"DownArrow" {
+						$previousIndex = $SelectedIndex
+						if ($SelectedIndex -lt ($Items.Count - 1)) { $SelectedIndex++ } else { $SelectedIndex = 0 }
+						Write-MenuItem -Index $previousIndex -IsSelected $false -TopLine $menuTop
+						Write-MenuItem -Index $SelectedIndex -IsSelected $true -TopLine $menuTop
+					}
+					"Enter" {
+						break KeyLoop
+					}
+					"Escape" {
+						return
+					}
+				}
+			}
+		} finally {
+			[Console]::CursorVisible = $true
+		}
+
+		Clear-Host
+		$selected = $Items[$SelectedIndex]
+		Write-Host (" Executando: {0}" -f $selected.Nome) -ForegroundColor Cyan
+		Write-Host "-------------------------------------------" -ForegroundColor DarkGray
+		try {
+			& $selected.Acao
+		} catch {
+			Write-Host ""
+			Write-Host (" Erro: {0}" -f $_.Exception.Message) -ForegroundColor Red
+		}
+		if ($PauseAfterAction) {
+			Write-Host ""
+			Write-Host " Pressione qualquer tecla para voltar ao menu..." -ForegroundColor Gray
+			[void][Console]::ReadKey($true)
+		}
+		$SelectedIndex = 0
+	}
+}
+
+function Show-SegmentMenu {
+	param(
+		[Parameter(Mandatory=$true)][hashtable]$Segments
+	)
+
+	$orderedSegments = @("Geral", "Claro", "Oi", "Tim") | Where-Object { $Segments.ContainsKey($_) }
+	$segmentItems = foreach ($segmentName in $orderedSegments) {
+		$collection = $Segments[$segmentName]
+		[pscustomobject]@{
+			Nome = $segmentName
+			Acao = { Show-FirstMenu -Items $collection }.GetNewClosure()
+		}
+	}
+
+	Show-FirstMenu -Items $segmentItems -PauseAfterAction:$false -IsRootMenu:$true
+}
+
+function Search-RamalPinTim {
+	param(
+		[Parameter(Mandatory=$true)][string]$LookupValue
+	)
+
+	$ramalPath = "\\romulo.grupoaec.com.br\script_tim.$\Ramal_TIM\RamalP.txt"
+	$webResponse = Invoke-WebRequestSafe -Uri $ramalPath
+	if ($null -eq $webResponse) { return $null }
+	$resp = $webResponse.RawContent
+	Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
+
+	$lookupNormalized = $LookupValue.Trim()
+	$lookupPin = ($lookupNormalized -replace '\D', '')
+	if ($resp) {
+		$lines = $resp -split "`r?`n"
+
+		foreach ($line in $lines) {
+			if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+			$parts = $line.Split(',')
+			if ($parts.Count -lt 3) { continue }
+
+			$pinCandidate    = $parts[0].Trim().Trim([char]0xFEFF)
+			$ramalCandidate  = $parts[1].Trim()
+			$userCandidate   = $parts[2].Trim()
+
+			$pinCandidateNormalized = ($pinCandidate -replace '\D', '')
+			$isPinMatch = ($lookupPin.Length -gt 0 -and $lookupPin -eq $pinCandidateNormalized)
+			$isUserMatch = $lookupNormalized.Equals($userCandidate, [System.StringComparison]::OrdinalIgnoreCase)
+
+			if (-not ($isPinMatch -or $isUserMatch)) { continue }
+
+			if ($ramalCandidate -notmatch '^\d{7}$') { continue }
+
+			switch ($ramalCandidate.Substring(0, 3)) {
+				"312" { $resolvedSite = "BH" }
+				"382" { $resolvedSite = "MOC" }
+				default { continue }
+			}
+
+			return [pscustomobject]@{
+				Pin   = $pinCandidateNormalized
+				Ramal = $ramalCandidate
+				Site  = $resolvedSite
+			}
+		}
+	}
+
+	return $null
+}
+
+#-----------------------------------Script Session-----------------------------------
+#-----------------------------------Scripts Gerais-----------------------------------
+$scriptsGeral = @(
+	[pscustomobject]@{
+		Nome = "Liberar ADM"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Write-Host " Ajustando permissões de administrador..." -ForegroundColor Cyan
+			Write-Host " Esta configuração não é eficaz em todos os sistemas pois não sobrepõe as políticas de grupo locais ou de domínio." -ForegroundColor Yellow
+			
+			Edit-Reg -Action "Remove" -Path "ADM:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
+            Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
+            Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Target "Item" 
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Type "DWord" -Value 3
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Type "DWord" -Value 0
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Type "DWord" -Value 1
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "PromptOnSecureDesktop" -Type "DWord" -Value 0
+            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableRegistryTools" -Type "DWord" -Value 0
+
+			Write-Host " Permissões ajustadas!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Limpar Cache"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Stop-Process -Name chrome*, msedge*, iexplore*, concentr*, receiver*, redirector*, radeobj*, wfcrun32*, wfica32*, pnamain* -Force -ErrorAction SilentlyContinue
+			RunDll32.exe inetcpl.cpl,ClearMyTracksByProcess 255
+
+			$user = Get-ActiveUser
+			$userDir = "C:\Users\$user"
+
+			Remove-FSItem -Path "$userDir\AppData\Local\Apps\2.0"
+			function Clear-Folder($path) {
+				if (Test-Path $path) {
+					Remove-Item "$path\*" -Force -Recurse -ErrorAction SilentlyContinue
+				}
+			}
+
+			$user = Get-ActiveUser
+			$userPath = "C:\Users\$user"
+
+			$folders = @(
+				"$userPath\AppData\Local\Temp",
+				"$userPath\AppData\Local\Google\Chrome\User Data",
+				"$userPath\AppData\Local\Microsoft\Edge\User Data",
+				"$userPath\AppData\Local\Microsoft\Terminal Server Client\Cache",
+				"$userPath\AppData\Local\Citrix",
+				"$userPath\AppData\Roaming\ICAClient",
+				"$env:SystemRoot\Temp",
+				"$env:SystemDrive\Temp"
+			)
+
+			foreach ($f in $folders) { Clear-Folder $f }
+
+			Write-Host "Limpeza concluída."
+			Pause
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Win10 > Win11"
+		Acao = {
+			
+			Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
+
+			function Restart-Explorer {
+				Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+				Start-Sleep -Seconds 2
+				Start-Process explorer.exe -ErrorAction SilentlyContinue
+			}
+
+            function Update-ExplorerColors {
+Add-Type -TypeDefinition @"
+	using System;
+	using System.Runtime.InteropServices;
+	public class Win32 {
+		[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)]
+		public static extern IntPtr SendMessageTimeout(
+			IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
+			uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+	}
+"@ -ErrorAction SilentlyContinue
+
+
+                $HWND_BROADCAST   = [IntPtr]0xffff
+                $WM_SETTINGCHANGE = 0x1A
+                $SMTO_ABORTIFHUNG = 0x2
+                $result = [IntPtr]::Zero
+
+                [void][Win32]::SendMessageTimeout(
+                    $HWND_BROADCAST,
+                    $WM_SETTINGCHANGE,
+                    [IntPtr]::Zero,
+                    "ImmersiveColorSet",
+                    $SMTO_ABORTIFHUNG,
+                    100,
+                    [ref]$result
+                )
+				Stop-Process -Name explorer.exe -ErrorAction SilentlyContinue
+				Start-Process explorer.exe -ErrorAction SilentlyContinue
+            }
+
+			Stop-Process -Name Widgets -ErrorAction SilentlyContinue
+			Get-AppxPackage Microsoft.WidgetsPlatformRuntime -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			Get-AppxPackage MicrosoftWindows.Client.WebExperience -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			Restart-Explorer
+
+			Edit-Reg -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Type "DWord" -Value 1
+
+			Edit-Reg -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Type "DWord" -Value 1
+
+			Edit-Reg -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
+			Edit-Reg -Path "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
+			Edit-Reg -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowCopilotButton" -Type "DWord" -Value 0
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "IsCopilotAvailable" -Type "DWord" -Value 0
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "CopilotDisabledReason" -Type "String" -Value "IsEnabledForGeographicRegionFailed"
+			Edit-Reg -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsCopilot" -Name "AllowCopilotRuntime" -Type "DWord" -Value 0
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked" -Name "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}" -Type "String" -Value ""
+			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot\BingChat" -Name "IsUserEligible" -Type "DWord" -Value 0
+
+			Get-AppxPackage -AllUsers *Copilot* | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			Get-AppxPackage -AllUsers Microsoft.MicrosoftOfficeHub | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+
+			try {
+				$appx = (Get-AppxPackage MicrosoftWindows.Client.CoreAI -ErrorAction Stop).PackageFullName
+				$sid = Get-ActiveUserSid
+				Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\EndOfLife\$sid\$appx" -Target "Item" | Out-Null
+				Remove-AppxPackage $appx -ErrorAction SilentlyContinue
+			} catch {}
+
+			if ($Env:OneDrive) { icacls $Env:OneDrive /deny "Administrators:(D,DC)" | Out-Null }
+			Start-Process "C:\Windows\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -Wait -ErrorAction SilentlyContinue
+			Stop-Process -Name FileCoAuth,Explorer -ErrorAction SilentlyContinue
+			Remove-FSItem -Path "$Env:LocalAppData\Microsoft\OneDrive"
+			Remove-FSItem -Path "C:\ProgramData\Microsoft OneDrive"
+			if ($Env:OneDrive) { icacls $Env:OneDrive /grant "Administrators:(D,DC)" | Out-Null }
+			Set-Service -Name OneSyncSvc -StartupType Disabled -ErrorAction SilentlyContinue
+			Start-Process explorer.exe -ErrorAction SilentlyContinue
+
+			@(
+				"Microsoft.XboxIdentityProvider",
+				"Microsoft.XboxSpeechToTextOverlay",
+				"Microsoft.GamingApp",
+				"Microsoft.Xbox.TCUI",
+				"Microsoft.XboxGamingOverlay",
+				"MicrosoftWindows.Client.WebExperience", 
+				"Microsoft.OneDrive"
+			) | ForEach-Object {
+				Get-AppxPackage -AllUsers $_ | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+			}
+
+			Edit-Reg -Action "Create" -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Target "Property" -Name "(default)" -Type "String" -Value ""
+			Restart-Explorer
+
+			Edit-Reg -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarAl" -Type "DWord" -Value 1
+			Restart-Explorer
+
+			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "AppsUseLightTheme" -Type "DWord" -Value 1
+			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "SystemUsesLightTheme" -Type "DWord" -Value 0
+			Update-ExplorerColors
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Desbloquear Navegadores"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Edit-Reg -Action "Remove" -Path "HKLM:\Software\Google\Chrome" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Google\Chrome" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
+			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
+
+			Stop-Process -Name chrome*, msedge* -Force -ErrorAction SilentlyContinue
+			Write-Host " Configurações de navegador resetadas." -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta ToLogado"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }
+
+			$dominio = "grupoaec.com.br"
+			$servers = "MOC","AIR","CPV","MRO","RJO","ORI"
+
+			$selectedSite = $null
+			Select-FromMenu -Options $servers -OutputVariable ([ref]$selectedSite) -Prompt "Selecione o site:"
+
+			if (!$selectedSite) { 
+				Write-Host " Nenhum servidor selecionado. Operação cancelada." -ForegroundColor Yellow		
+				return
+			}
+
+			Write-Host " Configurando ToLogado $selectedSite" -ForegroundColor Cyan
+			Write-Host ""
+
+			Write-Host " Validando conexão com a rede interna..." -ForegroundColor Cyan
+			Write-Host ""
+			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
+			if (-not $testMinhaAec) {
+				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
+				Set-DnsClientGlobalSetting -SuffixSearchList @($dominio)
+				Start-Sleep -Seconds 2
+
+				if (-not $testMinhaAec) {
+					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
+					return
+				}
+			}
+
+			if (-not (Test-Connection "192.168.88.8" -Count 2 -Quiet) -and
+			    -not (Test-Connection "$dominio" -Count 2 -Quiet)) {
+				Write-Host " Não há conexão com o servidor interno ($dominio)." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
+			Write-Host ""
+			$servers = "DGT_PUBL_$selectedSite", "AZURE-SRV01"
+
+			$bestServer = $servers | ForEach-Object {
+				try {
+					$pingResult = Test-Connection $_ -Count 2 -ErrorAction Stop | Measure-Object ResponseTime -Average
+					if ($pingResult) {
+						$r = $pingResult.Average
+						[PSCustomObject]@{Server=$_; Latency=$r}
+					}
+				} catch {}
+			} | Sort-Object Latency | Select-Object -First 1
+
+            if ($bestServer -and $bestServer.Server -ne "AZURE-SRV01") {
+                $tologadoPath = "\\$($bestServer.Server)\to_logado.$\Squirrel\setup.exe"
+            } else {
+                $tologadoPath = "\\AZURE-SRV01\tologado_ho.$\Squirrel\setup.exe"
+            }
+
+			Write-Host (" Servidor selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
+            
+			Get-Process aec*,self*,setup*,chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+			$user = Get-ActiveUser
+
+			Write-Host " Preparando arquivos..." -ForegroundColor Cyan
+            Remove-Item "C:\aec\setup.exe" -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Users\$user\Desktop\tô logado*" -Force -ErrorAction SilentlyContinue
+            Remove-Item "C:\Users\$user\AppData\Local\ToLogado*" -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
+            New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
+			if (-not (Copy-ItemSafe -Path $tologadoPath -Destination "C:\AEC\Setup_ToLogado.exe")) { return }
+
+			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut("C:\Users\$user\Desktop\Setup_ToLogado.lnk")
+            $Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
+            $Shortcut.Save()
+			
+			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Desinstalar Chrome"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Stop-Process -Name "chrome*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "Google*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "setup*" -Force -ErrorAction SilentlyContinue
+
+			wmic product where "name like 'Google Chrome%%'" call uninstall /nointeractive | Out-Null
+
+			if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
+				$chrome64ver = (wmic datafile where "name='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				& "C:\Program Files\Google\Chrome\Application\$chrome64ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
+				Remove-Item "C:\Program Files\Google" -Recurse -Force
+			}
+
+			if (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
+				$chrome86ver = (wmic datafile where "name='C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				& "C:\Program Files (x86)\Google\Chrome\Application\$chrome86ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
+				Remove-Item "C:\Program Files (x86)\Google" -Recurse -Force
+			}
+
+			Start-Sleep -Seconds 5
+
+			if (-not (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe")) {
+				if (-not (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")) {
+					Write-Host " Google Chrome desinstalado com sucesso." -ForegroundColor Green
+				} else {
+					Remove-Item "C:\Program Files (x86)\Google\Chrome" -Recurse -Force
+					Start-Sleep -Seconds 5
+				}
+			} else {
+				Start-Sleep -Seconds 5
+			}
+
+			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Ajustar Hora"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Set-Service -Name w32time -StartupType Automatic
+			Start-Service w32time
+
+			w32tm /config /manualpeerlist:"time.google.com" /syncfromflags:manual /reliable:YES /update
+
+			w32tm /resync
+
+			schtasks /create /tn "Sincronizar Hora com Internet" /tr "w32tm /resync" /sc onevent /ec System /mo "*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and (EventID=10000)]]" /ru SYSTEM /rl HIGHEST
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Desabilitar Serviços Kace/Sysmain"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Stop-Service -Name "konea" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "konea" -StartupType Disabled
+
+			Stop-Service -Name "OfflineScheduler" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "OfflineScheduler" -StartupType Disabled
+
+			Stop-Service -Name "AMPWatchDog" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "AMPWatchDog" -StartupType Disabled
+
+			Stop-Service -Name "AMPAgent" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "AMPAgent" -StartupType Disabled
+
+			Stop-Service -Name "sysmain" -Force -ErrorAction SilentlyContinue
+			Set-Service -Name "sysmain" -StartupType Disabled
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Modo Internet Explorer"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			Write-Host " Configurando Modo Internet Explorer no Microsoft Edge..." -ForegroundColor Cyan
+			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationLevel" -Type "DWord" -Value 1
+			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationTestingAllowed" -Type "DWord" -Value 1
+
+			Write-Host " Criando XML de sites em C:\edge_iemode..." -ForegroundColor Cyan
+			$folder = "C:\edge_iemode"
+			if (-not (Test-Path $folder)) {
+				New-Item -ItemType Directory -Path $folder | Out-Null
+			}
+
+			$xmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<site-list version="1">
+<author>tales.bouchardet</author>
+<site url="http://olimpia2/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://olimpia2/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://www1.centralnacionalunimed.com.br/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://www.cpandl.com/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://nicedbpappes1/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://nicedbpappes1/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://niceengage/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://niceengage.internal.timbrasil.com.br/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="https://niceengage.internal.timbrasil.com.br/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://vilas3/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+<site url="http://vilas3/Nice/">
+    <compat-mode>Default</compat-mode>
+    <open-in allow-redirect="true">IE11</open-in>
+</site>
+</site-list>
+"@
+
+			$xmlPath = "C:\edge_iemode\iemode.xml"
+			$xmlContent | Set-Content -Path $xmlPath -Encoding UTF8
+
+			Write-Host " Ajustando registros do Microsoft Edge..." -ForegroundColor Cyan
+
+			$siteListUri = "file:///C:/edge_iemode/iemode.xml"
+			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationSiteList" -Type "String" -Value $siteListUri
+
+			Stop-Process -Name msedge* -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Atualizando políticas de grupo..." -ForegroundColor Cyan
+			gpupdate /force | Out-Null
+
+			function New-EdgeShortcut {
+				param(
+					[string]$Name,
+					[string]$Url
+				)
+				$shortcutPath = "$env:PUBLIC\Desktop\$Name.lnk"
+				$edgeExe = if (Test-Path "C:\Program Files\Microsoft\Edge\Application\msedge.exe") {
+					"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+				} else {
+					"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+				}
+				$WshShell = New-Object -ComObject WScript.Shell	
+				$Shortcut = $WshShell.CreateShortcut($shortcutPath)
+				$Shortcut.TargetPath = $edgeExe
+				$Shortcut.Arguments = $Url
+				$Shortcut.WorkingDirectory = Split-Path -Path $edgeExe -Parent
+				$Shortcut.Save()
+			}
+
+			$atalho = $null		
+			Select-FromMenu -Options @("Nice Engage", "Nice DBAppES1", "Nice Oimpia2", "Nice Vilas3", "TOP V8") -OutputVariable ([ref]$atalho) -Prompt " Selecione o atalho a ser criado:"
+			
+			switch ($atalho) {
+				"Nice Engage" { 
+					New-EdgeShortcut -Name "Nice Engage" -Url "https://niceengage.internal.timbrasil.com.br/Nice/"
+				}
+				"Nice DBAppES1" {
+					New-EdgeShortcut -Name "Nice DBAppES1" -Url "http://nicedbpappes1/Nice/"
+				}
+				"Nice Oimpia2" {
+					New-EdgeShortcut -Name "Nice Oimpia2" -Url "http://olimpia2/Nice/"
+				}
+				"Nice Vilas3" {
+					New-EdgeShortcut -Name "Nice Vilas3" -Url "http://vilas3/Nice/"
+				}
+				"TOP V8" { 
+					New-EdgeShortcut -Name "TOP V8" -Url "https://www1.centralnacionalunimed.com.br/"
+				}
+				Default { Write-Host "Nenhum atalho criado." -ForegroundColor Yellow }
+			}
+
+			Write-Host "`nConfiguração de IE Mode aplicada com sucesso." -ForegroundColor Green
+			Write-Host "Verifique a lista em edge://compat/enterprise"
+		}
+	}
+)
+
+#------------------------------------Scripts Claro-----------------------------------
+$scriptsClaro = @(
+	[pscustomobject]@{
+		Nome = "Ajusta Atalhos"
+		Acao = {
+			$operacoes = @("AIR", "CPV", "PDI")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host " Erro" -ForegroundColor Red
+				return
+			}
+
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			Remove-FSItem -Path "$userDir\Desktop\*"
+
+			switch ($operacao) {
+				"AIR" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"PDI" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_ClaroEbt\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Proxy Claro"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+			if (-not (Test-Path $proxyRegPath)) {
+				New-Item -Path $proxyRegPath -Force | Out-Null
+			}
+			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
+			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
+			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
+
+			$proxyModeOptions = @("Automático", "Manual")
+			$proxyModeChoice = $null
+			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy Claro:"
+
+			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Configurando proxy para a Claro..." -ForegroundColor Cyan
+
+			if ($proxyModeChoice -eq "Automático") {
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "10.18.4.20:3128"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "spsweb*;*mercury*;*cobranca.claro*;webmail.aec.*;*gestordecobranca*;*cec*;cap.*;caphml.*;*.salesforce.com;*.salesforceliveagent.com;*.force.com;*incontact.com*;*.niceincontact.com*;*nice*;*cc.claro.com.br*;servbus.netservicos.com.br;netsmsapp*;*netsales*;*.claroideias.*;*.rjnet.com.br;*.sgdwebce.*;10.11.*;10.12.*;10.16.*;10.19.*;10.5.*;10.64.*;172.*;187.28.*;192.168.*;5.50.*;alfeu;am.claro.com.br;ativacao;ativacaob.claro.com.br;autocontrole;cachoeiras;cantagalo;cem.claro.com.br;cemi*;centraldecobertura;citrixgwcc*;claro.atenalms.com.br;clarobonus.*;clarobonusb.*;clarogestoronline*;claro-gestoronline.*;clarohelpdesk;claromensagemb.claro.com.br;clarotorpedoweb.*;clarounifica;consultafaturas;contaonline2.claro.com.br;contaonlinepf2.claro.com.br;contingenciaoffline.*;cpc.claro.com.br;ecob.claro.com.br;edoc11g.claro.com.br;empresas.claro.com.br;extratogsm;feu.claro.com.br;ged.claro.com.br;gestaodeconteudo;ggd.claro.com.br;mapacobertura*;idm.claro.com.br;idpinterno.claro.com.br;intranetdeatendimento.claro.com.br;intranetnacional;iw.claro.com.br;lmsclaro;mail.claro.com.br;mar.*;mc;migracaob;migracaob.claro.com.br;minhaaec;in.netservicos.corp;*mtaweb*;mti;oappaut.claro.com.br;owa.claro.com.br;pesquisacob.claro.com.br;pilardosul;pit;portaldeatendimento.claro.com.br;ps8port;ps8web;pugmil*;rjux0105;sgdln.claro.com.br;sgds1.claro.com.br;sgds2.claro.com.br;siga.claro.com.br;sigab.claro.com.br;spaceplanning-dev.azure-devices.net;spnadmin;spntsd01;taguai*;taprd2;ted.claro.com.br;terceiros.embratel.com.br;thexpress;totem;vipipcc.claro.com.br;webportal.nowonline.com.br;websan.claro.com.br;*wppnacional.claro.com.br;auto-controle;microcredito.claro.com.br;*.grupoaec.com.br;*.grupoaec.local;*.corp.clarobr;*clarosgvas.mobicare.com.br*;*.ilk.*;updateasc.netservicos.*;*esrccenter*;nmcol.*;claroclube*;sgd*;chat.claro*;mapacobertura*;*.cyf.*;hotptb*;eforce*;ipc.claro.com.br;ipchml.claro.com.br;*.duosecurity.com;vendasapp.*;authvendasapp.*;*parc.claro.com.br;*ativacaohomolmfa*;clarospa.cloud.com;*.cloud.com;*.citrixdata.com;<local>"
+				Write-Host " Configuração concluída!" -ForegroundColor Green
+				return
+			}
+
+			$manualValues = Show-ProxyForm `
+				-CurrentProxyEnable $currentProxyEnable `
+				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
+				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+
+			if ($null -eq $manualValues) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Host"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			$operacoes = @("AIR", "CPV", "PDI")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+			
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				return
+			}
+
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
+
+			switch ($operacao) {
+				"AIR" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"PDI" {
+					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Corrige Serviços Duo"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			Stop-Process -Name "citrixenter*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "duo*" -Force -ErrorAction SilentlyContinue
+
+			Start-Service -Name "DuoDesktopUpdateService" -ErrorAction SilentlyContinue
+			Start-Service -Name "DuoSecurityService" -ErrorAction SilentlyContinue
+			Start-Service -Name "DuoCryptoService" -ErrorAction SilentlyContinue
+			Start-Service -Name "DuoTrustedPeerMessageBrokerService" -ErrorAction SilentlyContinue
+
+			Start-Process "C:\Program Files (x86)\Duo Desktop\Duo Desktop.exe" -ErrorAction SilentlyContinue
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Certificados"
+		Acao = {
+			$folder = "C:\AeC"
+			if (-not (Test-Path $folder)) {
+				New-Item -ItemType Directory -Path $folder | Out-Null
+			}
+
+$ca01Content = @"
+-----BEGIN CERTIFICATE-----
+MIIFhTCCA22gAwIBAgIQQ8DtHS2h8rVN0y6cDPCPYjANBgkqhkiG9w0BAQsFADBJ
+MRcwFQYKCZImiZPyLGQBGRYHY2xhcm9icjEUMBIGCgmSJomT8ixkARkWBGNvcnAx
+GDAWBgNVBAMTD2NvcnAtQ0FQS0kwMS1DQTAeFw0xNzAyMTAxMTU3MzRaFw00NzAy
+MTAxMjA3MzJaMEkxFzAVBgoJkiaJk/IsZAEZFgdjbGFyb2JyMRQwEgYKCZImiZPy
+LGQBGRYEY29ycDEYMBYGA1UEAxMPY29ycC1DQVBLSTAxLUNBMIICIjANBgkqhkiG
+9w0BAQEFAAOCAg8AMIICCgKCAgEA18f8cPz9j5gjAxdHfc4vzxVZin5HLc4tOvHw
+xqR/0Bn6QX0DdpYv/YDCiNe+3F1eEfYI9h1IQfxTXpO26qV+0kQmjKKVueuTRJzR
+/IAkPT5J1Gw6dD36MHI7NzGQCyhjlY7ghz5mi589thhIJFdJdbJgPxsxVWnUN6I6
+xroSgWEpFNo09y6F9O700+VGNyDepn5y06vuH70zYoML0skQf1qqsCYi81uhujvg
+MMfb6x1OIKesFNaLDLO9YOSnaEt7OlohVarghhpRNJ+dmlXfrFLXtXbLonprcCf8
+NT2MX6VcQ7GBkzHo46ts+q3VFkd1A4ulvbSbArIrWar5JtHeCw5n2PNulzFW8M1E
+Q/94aDeCOVbUULBiO/egLjRe3THnZQMJi8lVBSj980fQrSAn2DX9WidE+5ODYZjw
+QOHL4p1trqenU42irl5vfz1DfRXLqXa0B6ZizsSMNlsLltj1wUEYZMRH3Gxau2HY
+yAycZQB7K5ssrCaLKAT69PeDjyJ7J6HiUZm1UKBRGhCR2GvzVHBrgHA4WW+tuIs7
+zSo9oV95mjmpMYUTOv16gyasXkTMhMvARDbQKLLTunXQZb1boVHnS6w7WGOxgVxK
+Dtq2BgBWF7av4kLd4aMOCtaJHL6zQc/IVnn5V22kcJJzozATYjj6yrGVTPvULL9U
+b1zwIVECAwEAAaNpMGcwEwYJKwYBBAGCNxQCBAYeBABDAEEwDgYDVR0PAQH/BAQD
+AgGGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFIwDulGsgjXMCzi6lnT+76ei
+kUquMBAGCSsGAQQBgjcVAQQDAgEAMA0GCSqGSIb3DQEBCwUAA4ICAQDBQuQkbUrq
+qX4stkCe71ga1VUBmQiViMfg0YcQl6Qyleim4WICJaJ23rZgzzYuzKmSpaetWGqg
+JN90CHXrB9ojFSueKUSTST+JzQWHwlmZojvabhS7srZHoWcHsItyCVWl0lImSTxX
+HEIeDx5fa4sZ9YHDRjVUrUreDrXrjV7NmOnFX3zTTKXGNdkfYttZ0S44TX0pN09I
+e792nobbFvIVc7OFFoqvml8ueQTCDNo7NAmmWt0m1FsqSXQfx1iZrV8TYm6YFKK2
+w0E6GFAmPs6CmOA4LeFO3b7e9iKwHMbZsqqZ8xKSnu6WJnx6J6OJOooffkLGgayZ
+/qGUI4drnxTbNvxSVLft1Be7tWYiqZT99HObzgRjgmhiErLovkNESxD+71HrjsBC
+D4eNrhUExWiJDkykUFMIwEoWeG/33FYgPC+AjFIn4c4nXcdCr5submjywy1BWN4u
+hdkshs6f/nc5abJoQQsuHD7JEljw2xMvB+AIjYF5ZgKxlp9w4ie17xUPmgyoNzyl
+tUqSoZ/bTtsgy7MEmXohVm1tVKtoYNW4tnJ0qdUScIpZwH7FargQK7TY4JSWRAlM
+eprRx/8kxSOa3nQo5aQRemfD23qs1FqdSBuzTxP+Xr5AjwEdDihvwuu0V2488NWf
++VxW4PoyRT31RC2AIonSUqNQDxq6fxY9OA==
+-----END CERTIFICATE-----
+"@
+			
+$ca02Content = @"
+-----BEGIN CERTIFICATE-----
+MIIIBzCCBe+gAwIBAgITGAAA5aPiJq0+xH8cewAAAADlozANBgkqhkiG9w0BAQsF
+ADBJMRcwFQYKCZImiZPyLGQBGRYHY2xhcm9icjEUMBIGCgmSJomT8ixkARkWBGNv
+cnAxGDAWBgNVBAMTD2NvcnAtQ0FQS0kwMS1DQTAeFw0yNTA4MTMyMjEzMjZaFw0z
+MDA4MTIyMjEzMjZaMEkxFzAVBgoJkiaJk/IsZAEZFgdjbGFyb2JyMRQwEgYKCZIm
+iZPyLGQBGRYEY29ycDEYMBYGA1UEAxMPY29ycC1DQVBLSTAyLUNBMIICIjANBgkq
+hkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAqCO8aAZMPvBtOrzoZZ/eMm1WxpIpVvsy
+5MAYKoyLB/d7xFn586/yPFqRmbEK88VmcwhsEOzfdLANBVdUlwIfZvZDSOhfyHaE
+El5TZW/4TEH8Ndu5ZYFeUzoe7a+dheguX3L9VtkPqEPaMVyzyxe+stkR/Ghv9p0o
+9BZHQp7Yxs8bt625IUedKznqF1hzZwI24TIwf1yQEV6l8ztCm88O7viR0glqvgcE
+n3T0J2BUQPzZh/MTDuD4jAFbXpxrJuG9QlfnBsAqXYzGcdp+lP3gJWPkJqbSIC6B
+IzFh+r/TDvNfw8fD851dP4uyI+fiqUPo4hbn/Myy1osBxxYJ9THZ62NQUn0B7FNU
+0oPxJBktPb/0/rA8+lcn+VbFEjNzInShUc76lbyhoEbLL7vgUkWdDRXGCbPfyU+q
+bpVg+ALtfgoSWJ4wUicANUfdoSUugO2BneRLniVS8BbGmqcJ3XF+zxVE7yzi8eme
+wpj/ShPyhj7v7TMwYA3QsSX5LtZ2tt+dirxhpZF50F5Duukmx5wyUQ8CYyBbPFXX
+WkHbjvIueQZL7mpRdof08lMtwSM8Z6ublyi+e0k58YumYOXRLz6gSDqSHZxT5+BN
+2S+Ayy3xHLn+Cyzac8qWzUBomDWQLWn3q4li/Sq0eRfF/5DC95rva6zb5FBLbgM2
+8iSOPL+9VA8CAwEAAaOCAuYwggLiMBAGCSsGAQQBgjcVAQQDAgECMCMGCSsGAQQB
+gjcVAgQWBBQ1pRgkNWk85hKAHPaDByidBKKF8DAdBgNVHQ4EFgQUFqe8ZS/xbDbG
+2gB41ZkZr7QcdnIwGQYJKwYBBAGCNxQCBAweCgBTAHUAYgBDAEEwDgYDVR0PAQH/
+BAQDAgGGMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0jBBgwFoAUjAO6UayCNcwLOLqW
+dP7vp6KRSq4wggEJBgNVHR8EggEAMIH9MIH6oIH3oIH0hoG3bGRhcDovLy9DTj1j
+b3JwLUNBUEtJMDEtQ0EsQ049Q0FQS0kwMSxDTj1DRFAsQ049UHVibGljJTIwS2V5
+JTIwU2VydmljZXMsQ049U2VydmljZXMsQ049Q29uZmlndXJhdGlvbixEQz1jb3Jw
+LERDPWNsYXJvYnI/Y2VydGlmaWNhdGVSZXZvY2F0aW9uTGlzdD9iYXNlP29iamVj
+dENsYXNzPWNSTERpc3RyaWJ1dGlvblBvaW50hjhodHRwOi8vQ0FQS0kwMi5jb3Jw
+LmNsYXJvYnIvY2VydGRhdGEvY29ycC1DQVBLSTAxLUNBLmNybDCCAR4GCCsGAQUF
+BwEBBIIBEDCCAQwwga8GCCsGAQUFBzAChoGibGRhcDovLy9DTj1jb3JwLUNBUEtJ
+MDEtQ0EsQ049QUlBLENOPVB1YmxpYyUyMEtleSUyMFNlcnZpY2VzLENOPVNlcnZp
+Y2VzLENOPUNvbmZpZ3VyYXRpb24sREM9Y29ycCxEQz1jbGFyb2JyP2NBQ2VydGlm
+aWNhdGU/YmFzZT9vYmplY3RDbGFzcz1jZXJ0aWZpY2F0aW9uQXV0aG9yaXR5MFgG
+CCsGAQUFBzAChkxodHRwOi8vQ0FQS0kwMi5jb3JwLmNsYXJvYnIvY2VydGRhdGEv
+Q0FQS0kwMS5jb3JwLmNsYXJvYnJjb3JwLUNBUEtJMDEtQ0EuY3J0MA0GCSqGSIb3
+DQEBCwUAA4ICAQBMJuZcasJOmHd7k1hZMSnXW7CmwPHaP1ckhJK6yfN6OHdsMCpb
+SshYcPAwK7qN7YWpx90E+U0yJ3+XQ100QQ+ZdH8iuwccvSi8qzxXMoLZKnM278QQ
+IEQ0skqUxCqVGuAN5P94DEczaG8LMNxxRR1dXWTQHnZ8e+yp54UCb47VC5rR+l2Q
+e4AJ1EBsxGys89QYsC20bEzLzDa8f82/gagMCXC52XIQW3G83ylrK6HJMOSE9+xm
+Agp4hlQTTjIOEVVlggn2/aDjdqkZgJlXs6pobBcn5uKRcPzMsVfR9vqhkCkf0k38
+hjt3QdzJayfR8y0rAPk/iN5mY4ZH1iPgl8k14hpXUwWnwoFnCm3nKVXkPzEQqD31
+3OMHpd3TVbVZ1+mM8A7UFglRnIzDFYecsWIr5HhqMlj7YV7g2hYYhhz5zNFPnUmE
+43WsoOQ06BSnDt3Hlcf6YJod0YkcgWvnRqFWF9hr8ooIMBm0kjy3t+Odsx8uzUMM
+RbsHIc7aeMCJPO9akYIAnYV86WFnLmWz80j3UEch4TzlSnAV+STnS8z3DlL6qj52
+XhLx7uf9rboY1L2mSGLIKxN3AMnLpyTc+OkF0D5BoZi/eAT/NLCO7sl2omWYN4oF
+FtbTsxs0AMoZjzVrLLe4i0AyeqNIY/47L8PWLFdGM78PioKk/tq+V1JnzQ==
+-----END CERTIFICATE-----
+"@
+
+$rootClaroContent = @"
+-----BEGIN CERTIFICATE-----
+MIIFmTCCA4GgAwIBAgIQEpRc3PTQMrhLv220Ul/gUzANBgkqhkiG9w0BAQsFADBf
+MRIwEAYKCZImiZPyLGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTATBgoJ
+kiaJk/IsZAEZFgVjbGFybzEdMBsGA1UEAxMUQ2xhcm8gUm9vdCBDQSAtIE5vdm8w
+HhcNMTYwMjA1MTE0ODM1WhcNNDYwMjA1MTE1ODMzWjBfMRIwEAYKCZImiZPyLGQB
+GRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTATBgoJkiaJk/IsZAEZFgVjbGFy
+bzEdMBsGA1UEAxMUQ2xhcm8gUm9vdCBDQSAtIE5vdm8wggIiMA0GCSqGSIb3DQEB
+AQUAA4ICDwAwggIKAoICAQCjQ/nsGxAGO8e7dHhk4s4Rb1O3xXlXHZm38QjxMVkm
+aTAfsCqzF6FMzKND7v3Can8zXVXSnnE2ZSH+Dv6eKJ1EEYL6BAnvVL1ZSNv7wRPi
+eOO0n5gGoImWQYYTxyeMaLKOth3VBadu8Xv4nXsVRMzYBcyTUTBCeLlL0eMwOgZm
+JjceGETEptwudBnYtwhuqipd0LBeYrF7VDESre0lTgXBzRNweDN58wUyhZ+3OxwZ
+T4P05QLLrxYkBiYF/UDweXyspDJIw+ZhGEDYBodrMrF/3vud+xlYeiFWS2EsQi4y
+sZNT+JUq93kxhQxUVaAEB0bMUz7jRflW+k9Vu7VfkC2kYyu09MhRnD+Qd+mpVh5C
+vfOWnnNwByILH6B6HeT183Q4ZWkMT4LbU3fqzUrx2uv+0HvFr/ACUauzLy+dNHXB
+igO7KqqymhR+eCoaNRbCuHE8jHonK2YboLlH8UwRR+p3t/jF6QpDimqW1OBEVUDm
+pP/dvKstX0lb2AxpuKcyF4UB9B4aFE+WJQf8rJiAspF/H3COrpRNwWbfxLsSsbmX
+tWVkb3zDDpbx6JB9cPCVDZsaC4Hq0CRFRJa8GmUJYAWqF/J8v5DzGslsXyquD/WY
+3z4OQ6lDpKhIfw0ENQEmy67g6mQtrOgA1/rigVU69FgEwGgIj0Xd8d1y/eUFh2EP
+OwIDAQABo1EwTzALBgNVHQ8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4E
+FgQUFObFdE4moHSRqXRbI7Bn3+3cvFIwEAYJKwYBBAGCNxUBBAMCAQAwDQYJKoZI
+hvcNAQELBQADggIBAIKwNjtaJiVXtHqqeBX0/SBNC4jf3Lxh6TwUL/uk5c9xXzJi
+PgwtaCcXeCbeAenoYe4Nt6YWSdz7dkiuA8588K5xLaNRvCr9c+j5BjXRtVKYXXdE
+1U7llHUgVKHoAccjmbA7dM8qVcXv/Fj/Q7FgP/IpqRV0lqKx/dwg5hWddTSuC2Us
+2NIQRUr9syc110yzXrhjmJn+qiuZFaNrkkPUORdgvaf5ApKLp98xgkc4GwhLxDj6
+0A42A/O1JYrN+5hz+r9mhCoO2hWeLhWRUZ8xiWKKPqSvrP2NSIm7dYOhhYNt/GFo
+Mz7sUnVZENfC8kEPFyhuSEoTgw2FY0Nlr4R7c5itSAPfxmzu58g/9HcRJMIQ6aLG
+xLgi1nVPkOJB0oJBsrtMMOKQQ9Ltulqv5/DVXlKJ8/7C8CxsRC6nDP59TxER/yp/
+5tCKnINFqthVaPxLwDfa/20pJL43Xn6Cy2hVtMpFNMnXuRrBOQjqndz9F0JFuPoF
+Us7b5gXffakKfXV36Z5nwl8FRKBaz72A46ZCOkqxY7WOSfyT1KEaPT2+4vI1IbuX
+A48pHfymmjuc1KBWNcLx/h4e9cVpDWgkWDJ9L/+xrMJ71EJ2nL8VhJME0kXZXFxo
+2EODRoXTR0jMmDhA9AmA2mJ/MDpaqb51qD6wZdxsYmoN7yO6fYApk8XeNtFQ
+-----END CERTIFICATE-----
+"@
+
+$subClaroContent = @"
+-----BEGIN CERTIFICATE-----
+MIIHaDCCBVCgAwIBAgITagAAAATbMr24lw1zAgAAAAAABDANBgkqhkiG9w0BAQsF
+ADBfMRIwEAYKCZImiZPyLGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTAT
+BgoJkiaJk/IsZAEZFgVjbGFybzEdMBsGA1UEAxMUQ2xhcm8gUm9vdCBDQSAtIE5v
+dm8wHhcNMTYwMzA4MTMyOTI2WhcNMjYwMzA4MTMzOTI2WjBmMRIwEAYKCZImiZPy
+LGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTATBgoJkiaJk/IsZAEZFgVj
+bGFybzEkMCIGA1UEAxMbQ2xhcm8gU3Vib3JkaW5hdGUgQ0EgLSBOb3ZvMIICIjAN
+BgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAq9eh0+oc0TRaujFD8VVzVyLqnAQo
+2GI7EoLON5aqN4ASAZtlmet+5iaBYkVKNiNlOyBT/J2kUILD9Ep18vFrGypurCtG
+SsLgvicd4fmlFE12K9hEd54N0V9GJYTOPLNwHagBag6nQ+IF41vU0y8QSEWwcZQo
+5OcOcB54g/C0DxjYDNgYtazO1Oyd+nPWz9v6C8WuAetpDIT0zjXGNOUpAhdfsyo5
+B1XpnCwwMdgmN44+VQMYK4tBfz86iEY6w1jpIPf2S/pkpjQg8A1P+pyWVb7/fNTB
+CObTqqAqCETPIZ143JvyiL73frquNVn4zsbJzbAAuMz5srlAjiZzD98PPVBwq3kQ
+F6JEE8xR9dnSfy1wLfH2Sd38Jdr5Dx01kgCpXcpXD5saFW7BKw2l5ZFXRgMaByYM
+ily/KDk+UfFNPiXhzg6hS9J9CChj5JvJ5dU5C4j3ZyVgknhEvVPgd7kW40p7D50m
+3Cj7571F6PBZiplhmucvSJL3Oc84fzidhw05Iz15ImqUEtBs2bxw3LzcYa9XOko5
+ceg9/rt5X+2ImgLBdkJNEglbup7RTeIae1NM4yLu3HKR1SkUgGLrabxEphvt0esl
+9hLFSFNNavwi8tOoXavUQxJ/BbndXn0Jvzz1hWhWxUzzUKryi6wIuzavWY+tW3BE
+lwiapXIYDjGs2kkCAwEAAaOCAhQwggIQMBAGCSsGAQQBgjcVAQQDAgEBMCMGCSsG
+AQQBgjcVAgQWBBTnwwwmticytvpnUeuZtkDot/jV5DAdBgNVHQ4EFgQUKYKecLMC
+wg656wgs792x/HjZZGowGQYJKwYBBAGCNxQCBAweCgBTAHUAYgBDAEEwCwYDVR0P
+BAQDAgGGMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0jBBgwFoAUFObFdE4moHSRqXRb
+I7Bn3+3cvFIwgZoGA1UdHwSBkjCBjzCBjKCBiaCBhoY9ZmlsZTovLy8vbG91dmVp
+cmEvQ2VydEVucm9sbC9DbGFybyUyMFJvb3QlMjBDQSUyMC0lMjBOb3ZvLmNybIZF
+aHR0cDovL2JpcmlndWkuY2xhcm8uY29tLmJyL2NlcnRkYXRhL0NsYXJvJTIwUm9v
+dCUyMENBJTIwLSUyME5vdm8uY3JsMIHABggrBgEFBQcBAQSBszCBsDBSBggrBgEF
+BQcwAoZGZmlsZTovLy8vbG91dmVpcmEvQ2VydEVucm9sbC9sb3V2ZWlyYV9DbGFy
+byUyMFJvb3QlMjBDQSUyMC0lMjBOb3ZvLmNydDBaBggrBgEFBQcwAoZOaHR0cDov
+L2JpcmlndWkuY2xhcm8uY29tLmJyL2NlcnRkYXRhL2xvdXZlaXJhX0NsYXJvJTIw
+Um9vdCUyMENBJTIwLSUyME5vdm8uY3J0MA0GCSqGSIb3DQEBCwUAA4ICAQBAMhlq
+hVDMVeaYF8GX3sNFHqSP/k9RP6Fa/L4hZwQGV/xpgcqMcch+ag/88m6pZ2yto5p8
+hhaTEBgXMjNONnGO7UDz+d9j5ltVJCZwO67lxdGoXskP3MQoM+oT7m0dnbr7VGrB
+6GfYX28Tzvvu0enDXeZUsV30fR7NBAf4rLQ5TDSX/zWisvWviMAcXe2CgkVmY9ig
+ocUfnZpf1ogRt/yxCFmfSN6KTqjrJTCIBV4bzS3GxoIcaekIctPgoQTBAe2A3PmY
+1OfKgPb3QNEUGH9fhKi6Rp8pgkA3Y9faj8QtgAtOmqd8POOVy81DjYRfTo9b3TBv
+wNkn1CkPoamCc3DX/jAQBb0XgGR/MSthT2KcP/P1qY08R+KcIhmHm0078nXTUhlJ
+9Y0kNO6MjmMb7yMVRZuO5u/1qQRDT550Ff8lTLFNiV+ew3cum3amucZUYsBcqX1S
+7sji8FnoUrfCSgsy3q0l36daeId8yQTznETIxLe31zg0n59SRoaVnZf6aSXESeZ7
+jAVMONgNAqkyY+TRLLWkCwiuWIFVTgHGnYgdK7IrF69gdQoxz2xUFH5FsZQTcCOL
+jxghM+jltXorDhZS5g0jUPKIeo/6PeZujtIQe4JZJhoAitWH7y4E5FXus6jTv5O9
+whdZ5PRXQVskvoVSOfnoI9hTZthlJf8d2k2DPQ==
+-----END CERTIFICATE-----
+"@
+
+$authWppContent = @"
+-----BEGIN CERTIFICATE-----
+MIIH+DCCBeCgAwIBAgITIwAAZ8gLVuHMXKFYMAABAABnyDANBgkqhkiG9w0BAQsF
+ADBmMRIwEAYKCZImiZPyLGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTAT
+BgoJkiaJk/IsZAEZFgVjbGFybzEkMCIGA1UEAxMbQ2xhcm8gU3Vib3JkaW5hdGUg
+Q0EgLSBOb3ZvMB4XDTI1MDQwNDE2MTA0OVoXDTI2MDMwODEzMzkyNlowdTELMAkG
+A1UEBhMCQlIxCzAJBgNVBAgTAlNQMREwDwYDVQQKEwhDbGFybyBTQTEfMB0GA1UE
+CxMWVGVjbm9sb2dpYSBlIFNlZ3VyYW5jYTElMCMGA1UEAxMcYXV0aHdwcG5hY2lv
+bmFsLmNsYXJvLmNvbS5icjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+AMNo2upvk8gjpS0wQ9f/uuKJEbHr4J+T0tbcEcg4eaA7h586UfwB9IzFZto2zeQn
+ZKkypzwUVIDFH1I35QBkPCCvxMfd8EeP1Fbi6tcTTPs7gfZnDmkZ7kqdqHorS2nK
+8SmpQdPz68SJFqME0TD6oF8ZCHrkdLfU5jXE7cfDvzszuXf6Tpqy8PX3TEVDcw1M
+aPOFK3pwwidxW7zG+yu539rRpc/beAdgALQZVNxaxVmB/oU2YlI3xS3W3UrtWwf6
+oV4+9dsZcSNd1pQv8VLtdYhORXDuIaEu9sAiGGhv53bjKASZ/GKYDurd8x0ZppZL
+dY0dnY+c4pxEvFM+mbxt01sCAwEAAaOCA44wggOKMCcGA1UdEQQgMB6CHGF1dGh3
+cHBuYWNpb25hbC5jbGFyby5jb20uYnIwHQYDVR0OBBYEFKHPqLiVVGcKJI5MG+EV
+60SY6EIZMB8GA1UdIwQYMBaAFCmCnnCzAsIOuesILO/dsfx42WRqMIIBOAYDVR0f
+BIIBLzCCASswggEnoIIBI6CCAR+Ggc5sZGFwOi8vL0NOPUNsYXJvJTIwU3Vib3Jk
+aW5hdGUlMjBDQSUyMC0lMjBOb3ZvLENOPWJpcmlndWksQ049Q0RQLENOPVB1Ymxp
+YyUyMEtleSUyMFNlcnZpY2VzLENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24s
+REM9Y2xhcm8sREM9Y29tLERDPWJyP2NlcnRpZmljYXRlUmV2b2NhdGlvbkxpc3Q/
+YmFzZT9vYmplY3RDbGFzcz1jUkxEaXN0cmlidXRpb25Qb2ludIZMaHR0cDovL2Jp
+cmlndWkuY2xhcm8uY29tLmJyL2NlcnRkYXRhL0NsYXJvJTIwU3Vib3JkaW5hdGUl
+MjBDQSUyMC0lMjBOb3ZvLmNybDCCAU0GCCsGAQUFBwEBBIIBPzCCATswgcYGCCsG
+AQUFBzAChoG5bGRhcDovLy9DTj1DbGFybyUyMFN1Ym9yZGluYXRlJTIwQ0ElMjAt
+JTIwTm92byxDTj1BSUEsQ049UHVibGljJTIwS2V5JTIwU2VydmljZXMsQ049U2Vy
+dmljZXMsQ049Q29uZmlndXJhdGlvbixEQz1jbGFybyxEQz1jb20sREM9YnI/Y0FD
+ZXJ0aWZpY2F0ZT9iYXNlP29iamVjdENsYXNzPWNlcnRpZmljYXRpb25BdXRob3Jp
+dHkwcAYIKwYBBQUHMAKGZGh0dHA6Ly9iaXJpZ3VpLmNsYXJvLmNvbS5ici9jZXJ0
+ZGF0YS9iaXJpZ3VpLmNsYXJvLmNvbS5icl9DbGFybyUyMFN1Ym9yZGluYXRlJTIw
+Q0ElMjAtJTIwTm92bygxKS5jcnQwCwYDVR0PBAQDAgWgMD0GCSsGAQQBgjcVBwQw
+MC4GJisGAQQBgjcVCIb09Bi1ngGGhYkFh6OHdIG49y6BHofir32C9eZpAgFmAgEM
+MB0GA1UdJQQWMBQGCCsGAQUFBwMCBggrBgEFBQcDATAnBgkrBgEEAYI3FQoEGjAY
+MAoGCCsGAQUFBwMCMAoGCCsGAQUFBwMBMA0GCSqGSIb3DQEBCwUAA4ICAQBWcXjo
+d/6E4sZDvvCXevYXHd3iLE/a29iSNjrqLBegrUmwbSeG7rubg+p0+yr9GCBnHIQ7
+5N1YhS07M+Z8EVAEyi4orCS7QNTKCFEQNQyVGRxgFQiB+qIEdCgGYb3yPE5QnpDE
+qqvgJ6Svx/9GWieepiByxarzQExkyY3kP75hrhx6hYtw+lR/DvqX0i1CL3DohyvI
+F4LXnrGSlndsFEBn8HiufaBYOfhlWy/+rNKA6lz+cfb93JexTYMxyjKbkNw+KWcK
+LpdebpDxwJsinncUp76TOFyeX9T7XlnsBQ+4nU+GkndPDwHfe0VQH27IyUVnDk4P
+2WURujw4SOsLcBZqssCDgZDO2dgeup2DFOwA84Pj7+joD9sQeIfZnvSMD6yitHjq
+z0RmAdgvJ2rVQmVvxCI371QbUq1Fu48jjwEI5Jq9dwFEGfYb88gnECp3z9JmpbKW
+HqEg/biusHinG6+7s8mhUtxy8sQ6uhWy8B4FQcXOS08NTf2wj68Axk3qjhx1DLUP
+xmt9ZeQ41l6Wx+ySYIMVE0GZ1ls1oFCbvlkkcOPnOxNggMIOS3gnYVLF9y+p57s7
+xzOu9EfLCt2Och6AzzcYRwx0RBV1oIt8Pma+R/+KLLTPi2BtIAOAtcuLdgOglfjN
+RzW5icWnQ49D4uMVd1edpoedxpRtQRmxGfa1Hw==
+-----END CERTIFICATE-----
+"@
+
+$WppContent = @"
+-----BEGIN CERTIFICATE-----
+MIIHPDCCBSSgAwIBAgITTQJjLK+t/Z2pNotg9wACAmMsrzANBgkqhkiG9w0BAQsF
+ADBJMRcwFQYKCZImiZPyLGQBGRYHY2xhcm9icjEUMBIGCgmSJomT8ixkARkWBGNv
+cnAxGDAWBgNVBAMTD2NvcnAtQ0FQS0kwMi1DQTAeFw0yNjAxMzAxMzEyMzdaFw0y
+NzAxMzAxMzEyMzdaMIGyMQswCQYDVQQGEwJCUjELMAkGA1UECBMCU1AxEjAQBgNV
+BAcTCVNhbyBQYXVsbzERMA8GA1UEChMIQ0xBUk8gU0ExHzAdBgNVBAsTFlRlY25v
+bG9naWEgZSBTZWd1cmFuY2ExITAfBgNVBAMTGHdwcG5hY2lvbmFsLmNsYXJvLmNv
+bS5icjErMCkGCSqGSIb3DQEJARYcY29udGF0b3JlZ2lzdHJvQGNsYXJvLmNvbS5i
+cjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALo5N9TDsOP0mPAZ1g7O
+aDdG5NgJTTbsoHn9oTcbEFeX+dgsyhLg+JSYo4aBDwxdGYHzY+7j/WhP64610TVb
+8Cic7Nzxa5wwfrZQz0leKvAFM+rwu3vjb5oP5geGliGCauqc9N+XOTP5PY57c2Iq
+frjSQxgMIwNTsnqUcJzV57MrkFv5Dw3YdmeNL3GnSXdbWsjWi3S377MzmoM8H9x7
+CRlXXA91mU/zQtt+pZtmIAh305W3zVXkRFQW/H7UrDxMelLZer2RNVYWKSm5/U2d
+nriFPySXISWk1Dp1Ra44PU1qzOY0lZTk0OmaLAmOA0JQI4bIypKgUSbs3WEx9+vi
+l+ECAwEAAaOCArEwggKtMEEGA1UdEQQ6MDiCGHdwcG5hY2lvbmFsLmNsYXJvLmNv
+bS5icoIcd3d3LndwcG5hY2lvbmFsLmNsYXJvLmNvbS5icjAdBgNVHQ4EFgQUgLdB
+NTaj1R9L1a51uCBOBSscQHYwHwYDVR0jBBgwFoAUFqe8ZS/xbDbG2gB41ZkZr7Qc
+dnIwgc4GA1UdHwSBxjCBwzCBwKCBvaCBuoaBt2xkYXA6Ly8vQ049Y29ycC1DQVBL
+STAyLUNBLENOPUNBUEtJMDIsQ049Q0RQLENOPVB1YmxpYyUyMEtleSUyMFNlcnZp
+Y2VzLENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24sREM9Y29ycCxEQz1jbGFy
+b2JyP2NlcnRpZmljYXRlUmV2b2NhdGlvbkxpc3Q/YmFzZT9vYmplY3RDbGFzcz1j
+UkxEaXN0cmlidXRpb25Qb2ludDCBwgYIKwYBBQUHAQEEgbUwgbIwga8GCCsGAQUF
+BzAChoGibGRhcDovLy9DTj1jb3JwLUNBUEtJMDItQ0EsQ049QUlBLENOPVB1Ymxp
+YyUyMEtleSUyMFNlcnZpY2VzLENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24s
+REM9Y29ycCxEQz1jbGFyb2JyP2NBQ2VydGlmaWNhdGU/YmFzZT9vYmplY3RDbGFz
+cz1jZXJ0aWZpY2F0aW9uQXV0aG9yaXR5MAsGA1UdDwQEAwIFoDA9BgkrBgEEAYI3
+FQcEMDAuBiYrBgEEAYI3FQiFypNNhNrcUYXhjxqDg8pCh4/bUR2Gt8Zuh4qTHAIB
+ZAIBRTAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwJwYJKwYBBAGCNxUK
+BBowGDAKBggrBgEFBQcDATAKBggrBgEFBQcDAjANBgkqhkiG9w0BAQsFAAOCAgEA
+ndCQJEYn4JVPJ0mPBDi7zFbpQNO7Ld9he9pbp2EsO8wFVFU5L+Nugp5grnbd6qss
+STXNLpbfNNgf9WHmHARPGwq3kGcOQCfDrkVY11dhAPN4bx1NGKfIxC7GCLiT+7La
+gv7Jp/RiDxnh0RYBpV/P4ePbCx1kYrP/vEbJgbMl0rPk/brpgZDU/FSDghkUcjGA
+AgY6pk8aVtMvttyH6PjM0zElea02gmFAF4+y0lHEu3H9SgjlSmJ+6MpoGLwUlAwn
+PzKlnG37sXzhW2SkBHoEU0eDZrg9HwpeX7GjxVQs/d9JQ+CkC/wzCKbwdHdKGtsg
+d/GSlXxK2bWnGer46S4279h2V37H9d/r0BLzDp0qfCZ+6UMcrOPAjZ5OGeYLdiIL
+RFhrrvgX066tlbEkrxL/7lvrACKf+EUEED/tTc49pDPi2RQLHjW6WkgFZU8+DkW2
+86DN4SstA5QRiq1u8Ns9V8lzl59YYi7prkznYbu59YgDTshc5aU8Skc+b9+PscFU
+MLj73Lz865UixNDeC3zIPo0F5hNp8Og4j+PJ6+wY0qwtPhb0oNpiOan4mxrCWXYt
+8mAlby9HLCYnypJI68/7DhDyVLzb1BhrPMVKRrhLQk561+FqmrlXxdNXext3LxRs
+S3IkMJlB1iDbOhwNJNRgN95eAGbDgW4NahgrSy26EjQ=
+-----END CERTIFICATE-----
+
+"@
+
+		$ca01Content | Set-Content -Path "$folder\corp-CAPKI01-CA.crt" -Encoding UTF8
+		$ca02Content | Set-Content -Path "$folder\corp-CAPKI02-CA.crt" -Encoding UTF8
+		$rootClaroContent | Set-Content -Path "$folder\Claro Root CA - Novo.cer" -Encoding UTF8
+		$subClaroContent | Set-Content -Path "$folder\Claro Subordinate CA - Novo.cer" -Encoding UTF8
+		$authWppContent | Set-Content -Path "$folder\authwppnacional.claro.com.br.cer" -Encoding UTF8
+		$WppContent | Set-Content -Path "$folder\wppnacional.claro.com.br.cer" -Encoding UTF8
+		
+		Import-Certificate -FilePath "$folder\corp-CAPKI01-CA.crt" -CertStoreLocation Cert:\LocalMachine\Root
+		Import-Certificate -FilePath "$folder\Claro Root CA - Novo.cer" -CertStoreLocation Cert:\LocalMachine\Root
+
+		Import-Certificate -FilePath "$folder\corp-CAPKI02-CA.crt" -CertStoreLocation Cert:\LocalMachine\CA
+		Import-Certificate -FilePath "$folder\Claro Subordinate CA - Novo.cer" -CertStoreLocation Cert:\LocalMachine\CA
+
+		Import-Certificate -FilePath "$folder\wppnacional.claro.com.br.cer" -CertStoreLocation Cert:\LocalMachine\CA
+		Import-Certificate -FilePath "$folder\authwppnacional.claro.com.br.cer" -CertStoreLocation Cert:\LocalMachine\CA
+
+		}
+	}
+)
+
+#--------------------------------------Scripts Oi------------------------------------
+$scriptsOi = @(
+	[pscustomobject]@{
+		Nome = "Ajusta Atalhos"
+		Acao = {
+			if (-not (Get-SSCredential)) { return } 
+
+			$operacoes = @("CPV", "JRE")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host " Erro" -ForegroundColor Red
+				return
+			}
+
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			Remove-FSItem -Path "$userDir\Desktop\*"
+
+			switch ($operacao) {
+				"JRE" {
+					$networkPath = "\\calais.grupoaec.com.br\script_oi.$\Lnk_Desktop_Bko\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"CPV" {
+					$networkPath = "\\camila2.grupoaec.com.br\script_oi.$\Segmentos\Oi_Total_BackOffice\Lnk_Desktop\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Proxy Oi/Nio"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+			if (-not (Test-Path $proxyRegPath)) {
+				New-Item -Path $proxyRegPath -Force | Out-Null
+			}
+			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
+			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
+			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
+
+			$proxyModeOptions = @("Automático", "Manual")
+			$proxyModeChoice = $null
+			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy TIM:"
+
+			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Configurando proxy para a Oi/Nio..." -ForegroundColor Cyan
+
+			if ($proxyModeChoice -eq "Automático") {
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.134:8080"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "*.interno.srv.br;192.168.*;10.32.208.*;10.*;*.telemar;arsweb;oiatendeintegracao;minhaaec;minhaaec.grupoaec.com.br;*.intranet;oisistemas.extranet;sfa.oi.net.br;oilegal;saspx15m.brasiltelecom.com.br;*.grupoaec.com.br;*.grupoaec.local;*.local.srv.br;oisistemas.oi.net.br;*.interno.srv.br;spaceplanning-dev.azure-devices.net;*.gcp.nio;nioaplicacoes.niointernet.app.br;elroy.apps.ocpoi.oi.intranet;logincorp.local.srv.br;<local>"
+				Write-Host " Configuração concluída!" -ForegroundColor Green
+				return
+			}
+
+			$manualValues = Show-ProxyForm `
+				-CurrentProxyEnable $currentProxyEnable `
+				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
+				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+
+			if ($null -eq $manualValues) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Host"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			$operacoes = @("JRE", "CPV")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+			
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				return
+			}
+
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc"
+
+			switch ($operacao) {
+				"CPV" {
+					$networkPath = "\\camila2.grupoaec.com.br\script_oi.$\Workstation\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"JRE" {
+					$networkPath = "\\calais.grupoaec.com.br\script_oi.$\Host\hosts"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+)
+
+#--------------------------------------Scripts TIM-----------------------------------
+$scriptsTim = @(
+    [pscustomobject]@{
+        Nome = "Fechar Cisco/CallControl"
+        Acao = {
+            if (-not (Get-SSCredential)) { return }	
+            Write-Host " Fechando processos..." -ForegroundColor Cyan
+
+            Get-Process -Name @('cis*','mb*','*hide*','comm*','2comm*') -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+
+            Write-Host " Finalizado!" -ForegroundColor Green
+        }
+    }
+	[pscustomobject]@{
+		Nome = "Configura Cisco"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$cisoRegPath32 = "HKLM:\SOFTWARE\WOW6432Node\Cisco Systems, Inc.\Cisco IP Communicator"
+			$ramal = $null
+			$site = $null
+
+			$user = (Read-Host "Informe o PIN ou usuário").Trim()
+
+			$searchResult = Search-RamalPinTim -LookupValue $user
+			if ($searchResult) {
+				$ramal = $searchResult.Ramal
+				$site = $searchResult.Site
+			}
+
+			if ([string]::IsNullOrEmpty($ramal)) {
+				Write-Host " Login/PIN não localizado." -ForegroundColor Yellow
+				
+				$retryOptions = @("Tentar novamente", "Digitar manualmente")
+				$retryChoice = $null
+				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o ramal manualmente?"
+
+				if ($retryChoice -eq "Tentar novamente") {
+					$user = (Read-Host " Informe o PIN ou usuário").Trim()
+					$searchResult = Search-RamalPinTim -LookupValue $user
+					if ($searchResult) {
+						$ramal = $searchResult.Ramal
+						$site = $searchResult.Site
+					}
+				}
+			}
+			while ([string]::IsNullOrEmpty($site)) {
+				if ([string]::IsNullOrEmpty($ramal)) {
+					$ramal = Read-Host " Ramal"
+				}
+				
+				if ($ramal -notmatch '^\d{7}$') {
+					Write-Host " Ramal inválido. Ramal deve ter 7 dígitos." -ForegroundColor Red
+					$ramal = $null
+					continue
+				}
+
+				$site = Get-TimSiteFromRamal -Ramal $ramal
+				if ([string]::IsNullOrEmpty($site)) {
+					Write-Host " Ramal inválido. Ramal TIM começa com 312 ou 382." -ForegroundColor Red
+					$ramal = $null
+					$site = $null
+				}
+			}
+
+			Write-Host " Configurando Cisco para o ramal $ramal do site $site..." -ForegroundColor Cyan
+			if (Test-Path $cisoRegPath32) {
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "AlternateDeviceName" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "NetworkTabUI" -Type "DWord" -Value 2
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "EnableHttpDownload" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "TftpServer1" -Type "DWord" -Value 3229591562
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "TftpServer2" -Type "DWord" -Value 2206167050
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "AlternateTftp" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "EnableSIP" -Type "String" -Value "AEC_$site`_$ramal"
+			}
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}	
+	[pscustomobject]@{
+		Nome = "Configura CallControl"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$pin = $null
+			$lookupValue = (Read-Host "Informe o PIN ou usuário").Trim()
+			$searchResult = Search-RamalPinTim -LookupValue $lookupValue
+			if ($searchResult) {
+				$pin = $searchResult.Pin
+			}
+
+			if ([string]::IsNullOrEmpty($pin)) {
+				Write-Host " Login/PIN não localizado." -ForegroundColor Yellow
+				
+				$retryOptions = @("Tentar novamente", "Digitar manualmente")
+				$retryChoice = $null
+				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o PIN manualmente?"
+
+				if ($retryChoice -eq "Tentar novamente") {
+					$lookupValue = (Read-Host " Informe o PIN ou usuário novamente").Trim()
+					$searchResult = Search-RamalPinTim -LookupValue $lookupValue
+					if ($searchResult) {
+						$pin = $searchResult.Pin
+					}
+				}
+			}
+
+			while ([string]::IsNullOrEmpty($pin)) {
+				$pin = (Read-Host " Digite o PIN").Trim()
+
+				if ($pin -notmatch '^\d{7}$') {
+					Write-Host " PIN inválido. PIN deve conter 7 dígitos." -ForegroundColor Red
+					$pin = $null
+					continue
+				}
+
+				if ($pin -notmatch '^(383|313)') {
+					Write-Host " PIN inválido. PIN deve começar com 383 ou 313." -ForegroundColor Red
+					$pin = $null
+					continue
+				}
+			}
+
+			Write-Host " Configurando CallControl para o PIN $pin..." -ForegroundColor Cyan
+			Edit-Reg -Action "Create" -Path "HKCU:\Environment" -Name "AgentID" -Type "String" -Value "$pin" | Out-Null
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Proxy TIM"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+			if (-not (Test-Path $proxyRegPath)) {
+				New-Item -Path $proxyRegPath -Force | Out-Null
+			}
+			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
+			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
+			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
+
+			$proxyModeOptions = @("Automático", "Manual")
+			$proxyModeChoice = $null
+			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy TIM:"
+
+			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Write-Host " Configurando proxy para a TIM..." -ForegroundColor Cyan
+
+			if ($proxyModeChoice -eq "Automático") {
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.150:8080"
+				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "10.*;192.*;172.*;62.101.*;200.198.*;*.timbrasil.com.br;*.timsul.com.br;*.timint;*.tim.it;*.grupoaec.com.br;*.grupoaec.local;aplicacoestim;SNEP*;capps*;RJO*;rjocpdwe03;rjocpdwi07;ccare.blah.com;timbr.upstreamsystems.com;timx-search-prd-001*;exchange2016.aec.com.br;exchange2-2016.aec.com.br;spaceplanning-dev.azure-devices.net;snepsto01v;cbcf;sage;simig;br.msn.com;minhaaec;minhaaec.grupoaec.com.br;authb2b2c.tim.com.br;auth3b2b2c.tim.com.br;*googleapis.com;<local>"
+				Write-Host " Configuração concluída!" -ForegroundColor Green
+				return
+			}
+
+			$manualValues = Show-ProxyForm `
+				-CurrentProxyEnable $currentProxyEnable `
+				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
+				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+
+			if ($null -eq $manualValues) {
+				Write-Host " Operação cancelada." -ForegroundColor Yellow
+				return
+			}
+
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
+			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Atalhos"
+		Acao = {
+			if (-not (Get-SSCredential)) { return } 
+
+			$operacoes = @("MOC", "ORI", "RJO")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host " Erro" -ForegroundColor Red
+				return
+			}
+
+			$user = Get-ActiveUser
+			$userDir = "C:\users\$user\"
+			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			Remove-FSItem -Path "$userDir\Desktop\*"
+
+			switch ($operacao) {
+				"MOC" {
+					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"ORI" {
+					$networkPath = "\\mercurio-vm2.grupoaec.com.br\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				"RJO" {
+					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Ajusta Host"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			$operacoes = @("MOC", "ORI", "RJO")
+			$operacao = $null
+			Select-FromMenu -Options $operacoes -OutputVariable ([ref]$operacao) -Prompt " Escolha a operação:"
+			
+			if ([string]::IsNullOrEmpty($operacao)) {
+				Write-Host "Erro: nenhuma operação escolhida" -ForegroundColor Red
+				return
+			}
+
+			$hostsDir = "$env:SystemRoot\System32\drivers\etc\hosts"
+
+			switch ($operacao) {
+				"MOC" {
+					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Hosts\HOSTS"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"ORI" {
+					$networkPath = "\\mercurio-vm2\script_tim_ipcc.$\Host\HOSTS"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				"RJO" {
+					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Host\HOSTS"
+					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+				}
+				default { Write-Host "Operação inválida" -ForegroundColor Red }
+			}
+		}
+	}
+)
+
+$segments = @{
+	Geral = $scriptsGeral
+	Claro = $scriptsClaro
+	Oi    = $scriptsOi
+	Tim   = $scriptsTim
+}
+
+Show-SegmentMenu -Segments $segments
