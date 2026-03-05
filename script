@@ -18,8 +18,8 @@ function Get-SSCredential {
 }
 
 function Get-ActiveUser {
-	$rawUser = (query user | Select-String 'Ativo|Active' | ForEach-Object { ($_ -split '\s+')[0] })
-	$username = $rawUser.TrimStart('>')
+	$rawUser = (Get-CimInstance Win32_ComputerSystem).UserName
+	$username = $rawUser.TrimStart('GRUPO_A&C\')
 	$sid = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | Where-Object { $_.ProfileImagePath -eq "C:\Users\$username" }).PSChildName
 	return [pscustomobject]@{
 		username = $username
@@ -177,7 +177,7 @@ function Show-FirstMenu {
 	)
 
 	if ($null -ne $Segments) {
-		$orderedSegments = @("Geral", "Claro", "Oi", "Tim") | Where-Object { $Segments.ContainsKey($_) }
+		$orderedSegments = @("Geral", "Programas", "Claro", "Oi", "Tim") | Where-Object { $Segments.ContainsKey($_) }
 		$Items = foreach ($segmentName in $orderedSegments) {
 			$collection = $Segments[$segmentName]
 			[pscustomobject]@{
@@ -277,19 +277,15 @@ function Search-RamalPinTim {
 		Write-Host "Não foi possível determinar o usuário ativo." -ForegroundColor Red
 		return $null
 	}
+	
+	$username = $username.Trim().ToLower()
 
 	$ramalPath = "\\romulo.grupoaec.com.br\script_tim.$\Ramal_TIM\RamalP.txt"
 
-	if (-not (Test-Path -Path "romulo.grupoaec.com.br")) {
+	if (-not (Test-Connection "romulo.grupoaec.com.br" -Count 2)) {
 		Write-Host "Sem acesso ao caminho de rede interna"
 		return $null
 	}
-	if (-not (Test-Path -Path $ramalPath)) {
-		Write-Host "Arquivo de ramais não encontrado no caminho esperado: $ramalPath" -ForegroundColor Red
-		return $null
-	}
-
-	$username = $username.Trim().ToLower()
 
     Write-Host "Buscando ramal para '$username'..." -ForegroundColor Cyan
 
@@ -298,7 +294,7 @@ function Search-RamalPinTim {
     foreach ($line in $resp) {
         $parts = $line -split ","
         if ($parts.Count -ge 3) {
-            $lineUsername = $parts[2].Trim().ToLower()   # usuário está na 3ª coluna
+            $lineUsername = $parts[2].Trim().ToLower() 
             if ($lineUsername -eq $username) {
                 return @{
                     Ramal = $parts[0].Trim()
@@ -380,8 +376,8 @@ $scriptsGeral = @(
 		Acao = {
 			function Update-ExplorerColors {
                 if (-not ('Win32.NativeMethods' -as [type])) {
-                    Add-Type -Namespace Win32 -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class NativeMethods { [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult); }' -ErrorAction SilentlyContinue
-                }
+					Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; namespace Win32 { public static class NativeMethods { [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult); } }'
+				}
 
                 $result = [IntPtr]::Zero
                 [void][Win32.NativeMethods]::SendMessageTimeout(
@@ -393,9 +389,9 @@ $scriptsGeral = @(
                     100,
                     [ref]$result
                 )
-
+				}
                 Get-Process -Name explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 2
+                Start-Sleep -Seconds 5
                 Start-Process explorer.exe -ErrorAction SilentlyContinue
 
 				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked" -Name "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}" -Type "String" -Value ""
@@ -411,7 +407,6 @@ $scriptsGeral = @(
 				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "AppsUseLightTheme" -Type "DWord" -Value 1
 				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "SystemUsesLightTheme" -Type "DWord" -Value 0
                 Update-ExplorerColors
-            }
 		}
 	}
 	[pscustomobject]@{
@@ -712,7 +707,7 @@ $scriptsProgramas = @(
 
 			Write-Host (" Selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
             
-			Get-Process aec*, self*, setup*, chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+			Get-Process aec*, self*, setup*, chromed* | Stop-Process -Force -ErrorAction SilentlyContinue
 
 			$username = (Get-ActiveUser).username
 			$userDir = "C:\Users\$username"
@@ -724,21 +719,14 @@ $scriptsProgramas = @(
 
 			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
 			New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
-			$pathToCheck = if ($tologadoPath -like '*`**') { Split-Path -Path $tologadoPath -Parent } else { $tologadoPath }
-			if ($tologadoPath -like '\\*' -and -not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) {
-				Write-Host "Sem acesso ao caminho de rede interna"
-				return
-			}
 			Copy-Item -Path $tologadoPath -Destination "C:\AEC\Setup_ToLogado.exe" -Force -ErrorAction SilentlyContinue
-
-			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
+			
 			$WshShell = New-Object -ComObject WScript.Shell
 			$Shortcut = $WshShell.CreateShortcut("$userDir\Desktop\Setup_ToLogado.lnk")
+
 			$Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
+			$Shortcut.WorkingDirectory = Split-Path "C:\AEC\Setup_ToLogado.exe"
 			$Shortcut.Save()
-			
-			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
-			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
 	[PSCustomObject]@{
@@ -750,36 +738,31 @@ $scriptsProgramas = @(
 			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
 			Stop-Process -Name "setup*" -Force -ErrorAction SilentlyContinue
 
-			wmic product where "name like 'Google Chrome%%'" call uninstall /nointeractive | Out-Null
+			Get-Package -Name "Google Chrome*" | Uninstall-Package -Force | Out-Null
 
 			if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
-				$chrome64ver = (wmic datafile where "name='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				$chrome64ver = (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
 				& "C:\Program Files\Google\Chrome\Application\$chrome64ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
 				Remove-Item "C:\Program Files\Google" -Recurse -Force
 			}
 
 			if (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
-				$chrome86ver = (wmic datafile where "name='C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				$chrome86ver = (Get-Item "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
 				& "C:\Program Files (x86)\Google\Chrome\Application\$chrome86ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
 				Remove-Item "C:\Program Files (x86)\Google" -Recurse -Force
 			}
 
 			Start-Sleep -Seconds 5
 
-			if (-not (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe")) {
-				if (-not (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")) {
-					Write-Host " Google Chrome desinstalado com sucesso." -ForegroundColor Green
-				}
-				else {
-					Remove-Item "C:\Program Files (x86)\Google\Chrome" -Recurse -Force
-					Start-Sleep -Seconds 5
-				}
+			if ((Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe")) {
+				Remove-Item "C:\Program Files\Google\Chrome" -Recurse -Force
 			}
-			else {
-				Start-Sleep -Seconds 5
+			
+			if ((Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")) {
+				Remove-Item "C:\Program Files (x86)\Google\Chrome" -Recurse -Force
 			}
-
-			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+			
+			Write-Host "Chrome desinstalado com sucesso!" -ForegroundColor Green
 
 		}
 	}
@@ -1466,13 +1449,13 @@ $scriptsTim = @(
 				Remove-Item -Path "$userDir\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
 			}
 			catch {
-				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+				Write-Host (" Erro: {0}" -f $_.Exception.Message) -ForegroundColor Red
 			}
 			try {
 				Remove-Item -Path "$publicDesktop\*" -Recurse -Force -ErrorAction SilentlyContinue
 			}
 			catch {
-				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+				Write-Host (" Erro: {0}" -f $_.Exception.Message) -ForegroundColor Red
 			}
 			
 			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
@@ -1495,19 +1478,19 @@ $scriptsTim = @(
 				"MOC" {
 					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*"
 					$pathToCheck = Split-Path -Path $networkPath -Parent
-					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Connection "romulo.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\romulo"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"ORI" {
 					$networkPath = "\\mercurio-vm2.grupoaec.com.br\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*"
 					$pathToCheck = Split-Path -Path $networkPath -Parent
-					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Connection "mercurio-vm2.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\mercurio-vm2"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"RJO" {
 					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*"
 					$pathToCheck = Split-Path -Path $networkPath -Parent
-					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Connection "pamela2.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\pamela2"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
@@ -1532,17 +1515,17 @@ $scriptsTim = @(
 			switch ($operacao) {
 				"MOC" {
 					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Hosts\HOSTS"
-					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Connection "romulo.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\romulo"; return }
 					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"ORI" {
 					$networkPath = "\\mercurio-vm2\script_tim_ipcc.$\Host\HOSTS"
-					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Connection "mercurio-vm2.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\mercurio-vm2"; return }
 					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"RJO" {
 					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Host\HOSTS"
-					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Connection "pamela2.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\pamela2"; return }
 					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
