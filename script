@@ -4,47 +4,43 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8
 
 function Get-SSCredential {
-    $storedHash = "ad43282ea5d872ed9fdb3306e75ed712286a6478c597a05e4bb5ad2eb0d1c70f"
-
-    $inputSecure = Read-Host "Senha" -AsSecureString
-    $inputPlain  = [System.Net.NetworkCredential]::new("", $inputSecure).Password
-
-    $sha256 = New-Object System.Security.Cryptography.SHA256Managed
-    $inputHash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($inputPlain))
-    $inputHashHex = -join ($inputHash | ForEach-Object { $_.ToString("x2") })
-
-    if ($storedHash -eq $inputHashHex) {
-        return $true
-    } else {
-        Write-Host "Senha incorreta. Ação cancelada." -ForegroundColor Red
-        return $false
-    }
+	$storedHash = "6cc8519b91584e8bd435d63341e0838a99721948718b1c9c1e9c358c64ba992a"
+	$inputSecure = Read-Host "Senha" -AsSecureString
+	$inputPlain = [System.Net.NetworkCredential]::new("", $inputSecure).Password
+	$sha256 = New-Object System.Security.Cryptography.SHA256Managed
+	$inputHash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($inputPlain))
+	$inputHashHex = -join ($inputHash | ForEach-Object { $_.ToString("x2") })
+	if ($storedHash -eq $inputHashHex) {
+		return $true
+	}
+	Write-Host "Senha incorreta. Ação cancelada." -ForegroundColor Red
+	return $false
 }
 
 function Get-ActiveUser {
 	$rawUser = (query user | Select-String 'Ativo|Active' | ForEach-Object { ($_ -split '\s+')[0] })
-	return $rawUser.TrimStart('>')
+	$username = $rawUser.TrimStart('>')
+	$sid = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | Where-Object { $_.ProfileImagePath -eq "C:\Users\$username" }).PSChildName
+	return [pscustomobject]@{
+		username = $username
+		sid      = $sid
+	}
 }
 
-function Get-ActiveUserSid {
-	$user = Get-ActiveUser
-	return (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | Where-Object { $_.ProfileImagePath -eq "C:\Users\$user" }).PSChildName
-}
-
-function Edit-Reg {
+function Invoke-Reg {
 	param(
-		[Parameter(Mandatory=$false)][ValidateSet("Create","Remove")][string]$Action = "Create",
-		[Parameter(Mandatory=$true)][string]$Path,
-		[Parameter(Mandatory=$false)][ValidateSet("Item","Property")][string]$Target = "Property",
-		[Parameter(Mandatory=$false)][Alias("Name")][string]$PName,
-		[Parameter(Mandatory=$false)][ValidateSet("DWord","String")][string]$Type,
-		[Parameter(Mandatory=$false)]$Value
+		[Parameter(Mandatory = $true)][ValidateSet("Edit", "Search")][string]$Mode,
+		[Parameter(Mandatory = $false)][ValidateSet("Create", "Remove")][string]$Action = "Create",
+		[Parameter(Mandatory = $true)][string]$Path,
+		[Parameter(Mandatory = $false)][ValidateSet("Item", "Property")][string]$Target = "Property",
+		[Parameter(Mandatory = $false)][Alias("Name")][string]$PName,
+		[Parameter(Mandatory = $false)][ValidateSet("DWord", "String")][string]$Type,
+		[Parameter(Mandatory = $false)]$Value
 	)
 				
-	$sid = Get-ActiveUserSid
-	
+	$user = Get-ActiveUser
 	if ($Path -like 'HKCU:\*') {
-		$regPath = $Path -replace 'HKCU:', "Registry::HKEY_USERS\$sid"
+		$regPath = $Path -replace 'HKCU:', "Registry::HKEY_USERS\$($user.sid)"
 
 	}
 	elseif ($Path -like 'ADM:\*') {
@@ -54,15 +50,33 @@ function Edit-Reg {
 		$regPath = $Path
 	}
 
+	if ($Mode -eq "Search") {
+		if (-not (Test-Path $regPath)) { return $null }
+		try {
+			if ([string]::IsNullOrEmpty($PName)) {
+				return Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+			}
+			$propertyBag = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+			if ($null -eq $propertyBag) { return $null }
+			return $propertyBag.$PName
+		}
+		catch {
+			Write-Host ("Erro ao consultar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			return $null
+		}
+	}
+
 	
 	if ($Action -eq "Remove") {
 		try {
 			if ($Target -eq "Item") {
 				Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
-			} else {
+			}
+			else {
 				Remove-ItemProperty -Path $regPath -Name $PName -ErrorAction SilentlyContinue
 			}
-		} catch {
+		}
+		catch {
 			Write-Host ("Erro ao remover a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
 		}
 		return
@@ -73,196 +87,21 @@ function Edit-Reg {
 	try {
 		if ($Type -eq "DWord") {
 			New-ItemProperty -Path $regPath -Name $PName -Value ([int]$Value) -PropertyType DWord -Force | Out-Null
-		} else {
+		}
+		else {
 			New-ItemProperty -Path $regPath -Name $PName -Value ([string]$Value) -PropertyType String -Force | Out-Null
 		}
-	} catch {
+	}
+ catch {
 		Write-Host ("Erro ao criar/editar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
 	}
 }
 
-function Search-Reg {
-	param(
-		[Parameter(Mandatory=$true)][string]$Path,
-		[Parameter(Mandatory=$false)][Alias("Name")][string]$PName
-	)
-
-	$sid = Get-ActiveUserSid
-
-	$regPath = if ($Path -like 'HKCU:\*') {
-		$Path -replace '^HKCU:', "Registry::HKEY_USERS\$sid"
-	} elseif ($Path -like 'HKCU:\*') {
-		$Path -replace '^HKCU:', "Registry::HKEY_USERS\$sid"
-	} elseif ($Path -like 'ADM:\*') {
-		$Path -replace '^ADM:', "HKCU:"
-	} else {
-		$Path
-	}
-
-	if (-not (Test-Path $regPath)) { return $null }
-
-	try {
-		if ([string]::IsNullOrEmpty($PName)) {
-			return Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
-		}
-
-		$propertyBag = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
-		if ($null -eq $propertyBag) { return $null }
-
-		return $propertyBag.$PName
-	} catch {
-		Write-Host ("Erro ao consultar a chave: {0}" -f $_.Exception.Message) -ForegroundColor Red
-		return $null
-	}
-}
-
-function Show-ProxyForm {
-    param(
-        $CurrentProxyEnable,
-        [string]$CurrentProxyServer,
-        [string]$CurrentProxyOverride
-    )
-
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-
-    $form = New-Object Windows.Forms.Form
-    $form.Text = "Proxy Form"
-    $form.Size = New-Object Drawing.Size(430,250)
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = "FixedDialog"
-    $form.MaximizeBox = $false
-    $form.MinimizeBox = $false
-
-    function Add-Field($label, $y, $text, $multiLine = $false, $height = 23) {
-        $lbl = New-Object Windows.Forms.Label
-        $lbl.Text = $label
-        $lbl.Location = New-Object Drawing.Point(10,$y)
-        $lbl.AutoSize = $true
-        $form.Controls.Add($lbl)
-
-        $txt = New-Object Windows.Forms.TextBox
-        $txt.Location = New-Object Drawing.Point(150,$y)
-        $txt.Size = New-Object Drawing.Size(250,$height)
-        $txt.Multiline = $multiLine
-        if ($multiLine) { $txt.ScrollBars = "Vertical" }
-        $txt.Text = $text
-        $form.Controls.Add($txt)
-
-        return $txt
-    }
-
-    $chkEnable = New-Object Windows.Forms.CheckBox
-    $chkEnable.Text = "Habilitar Proxy"
-    $chkEnable.Location = New-Object Drawing.Point(10,20)
-    $chkEnable.AutoSize = $true
-    $chkEnable.Checked = ([int]$CurrentProxyEnable -eq 1)
-    $form.Controls.Add($chkEnable)
-
-    $txtServer   = Add-Field "ProxyServer:"   55  $CurrentProxyServer
-    $txtOverride = Add-Field "ProxyOverride:" 90  $CurrentProxyOverride $true 70
-
-    $txtServer.Enabled = $chkEnable.Checked
-
-    $chkEnable.Add_CheckedChanged({
-        $txtServer.Enabled = $chkEnable.Checked
-    })
-
-    # Botões levemente mais abaixo
-    $btnOk = New-Object Windows.Forms.Button
-    $btnOk.Text = "Salvar"
-    $btnOk.Size = New-Object Drawing.Size(75,28)
-    $btnOk.Location = New-Object Drawing.Point(245,175)
-    $form.Controls.Add($btnOk)
-
-    $btnCancel = New-Object Windows.Forms.Button
-    $btnCancel.Text = "Cancelar"
-    $btnCancel.Size = New-Object Drawing.Size(75,28)
-    $btnCancel.Location = New-Object Drawing.Point(325,175)
-    $form.Controls.Add($btnCancel)
-
-    $btnOk.Add_Click({
-        $form.Tag = [pscustomobject]@{
-            ProxyEnable   = if ($chkEnable.Checked) { 1 } else { 0 }
-            ProxyServer   = $txtServer.Text.Trim()
-            ProxyOverride = $txtOverride.Text.Trim()
-        }
-
-        $form.DialogResult = "OK"
-        $form.Close()
-    })
-
-    $btnCancel.Add_Click({ $form.Close() })
-
-    if ($form.ShowDialog() -ne "OK") { return $null }
-    return $form.Tag
-}
-
-function Remove-FSItem {
-	param(
-		[Parameter(Mandatory=$true)][string]$Path
-	)
-
-	try {
-		Remove-Item -Path $Path -Recurse -Force -ErrorAction SilentlyContinue
-	} catch {
-		Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
-	}
-}
-
-function Test-NetworkPathAccess {
-	param(
-		[Parameter(Mandatory=$true)][string]$Path
-	)
-
-	if ($Path -notlike '\\*') {
-		return $true
-	}
-
-	$pathToCheck = $Path
-	if ($pathToCheck -like '*`**') {
-		$pathToCheck = Split-Path -Path $pathToCheck -Parent
-	}
-
-	if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) {
-		Write-Host "Sem acesso ao caminho de rede interna"
-		return $false
-	}
-
-	return $true
-}
-
-function Copy-ItemSafe {
-	param(
-		[Parameter(Mandatory=$true)][string]$Path,
-		[Parameter(Mandatory=$true)][string]$Destination
-	)
-
-	if (-not (Test-NetworkPathAccess -Path $Path)) {
-		return $false
-	}
-
-	Copy-Item -Path $Path -Destination $Destination -Force -ErrorAction SilentlyContinue
-	return $true
-}
-
-function Invoke-WebRequestSafe {
-	param(
-		[Parameter(Mandatory=$true)][string]$Uri
-	)
-
-	if (-not (Test-NetworkPathAccess -Path $Uri)) {
-		return $null
-	}
-
-	return Invoke-WebRequest -Uri $Uri -UseBasicParsing -ErrorAction SilentlyContinue
-}
-
 function Select-FromMenu {
 	param(
-		[Parameter(Mandatory=$true)][array]$Options,
-		[Parameter(Mandatory=$true)][ref]$OutputVariable,
-		[Parameter(Mandatory=$true)][string]$Prompt
+		[Parameter(Mandatory = $true)][array]$Options,
+		[Parameter(Mandatory = $true)][ref]$OutputVariable,
+		[Parameter(Mandatory = $true)][string]$Prompt
 	)
 
 	$selectedIndex = 0
@@ -279,7 +118,8 @@ function Select-FromMenu {
 		$lineText = $label.PadRight([Math]::Max([Console]::WindowWidth - 1, $label.Length))
 		if ($IsSelected) {
 			Write-Host " > $lineText" -ForegroundColor Green -NoNewline
-		} else {
+		}
+		else {
 			Write-Host "   $lineText" -ForegroundColor White -NoNewline
 		}
 	}
@@ -320,7 +160,8 @@ function Select-FromMenu {
 				}
 			}
 		}
-	} finally {
+	}
+ finally {
 		[Console]::CursorVisible = $true
 	}
 	Clear-Host
@@ -329,10 +170,24 @@ function Select-FromMenu {
 function Show-FirstMenu {
 	param(
 		[array]$Items,
+		[hashtable]$Segments,
 		[int]$SelectedIndex = 0,
 		[bool]$PauseAfterAction = $true,
 		[bool]$IsRootMenu = $false
 	)
+
+	if ($null -ne $Segments) {
+		$orderedSegments = @("Geral", "Claro", "Oi", "Tim") | Where-Object { $Segments.ContainsKey($_) }
+		$Items = foreach ($segmentName in $orderedSegments) {
+			$collection = $Segments[$segmentName]
+			[pscustomobject]@{
+				Nome = $segmentName
+				Acao = { Show-FirstMenu -Items $collection }.GetNewClosure()
+			}
+		}
+		$PauseAfterAction = $false
+		$IsRootMenu = $true
+	}
 
 	function Write-MenuItem {
 		param(
@@ -346,7 +201,8 @@ function Show-FirstMenu {
 		$lineText = $label.PadRight([Math]::Max([Console]::WindowWidth - 1, $label.Length))
 		if ($IsSelected) {
 			Write-Host " > $lineText" -ForegroundColor Green -NoNewline
-		} else {
+		}
+		else {
 			Write-Host "   $lineText" -ForegroundColor White -NoNewline
 		}
 	}
@@ -388,7 +244,8 @@ function Show-FirstMenu {
 					}
 				}
 			}
-		} finally {
+		}
+		finally {
 			[Console]::CursorVisible = $true
 		}
 
@@ -398,7 +255,8 @@ function Show-FirstMenu {
 		Write-Host "-------------------------------------------" -ForegroundColor DarkGray
 		try {
 			& $selected.Acao
-		} catch {
+		}
+		catch {
 			Write-Host ""
 			Write-Host (" Erro: {0}" -f $_.Exception.Message) -ForegroundColor Red
 		}
@@ -411,76 +269,52 @@ function Show-FirstMenu {
 	}
 }
 
-function Show-SegmentMenu {
-	param(
-		[Parameter(Mandatory=$true)][hashtable]$Segments
-	)
-
-	$orderedSegments = @("Geral", "Claro", "Oi", "Tim") | Where-Object { $Segments.ContainsKey($_) }
-	$segmentItems = foreach ($segmentName in $orderedSegments) {
-		$collection = $Segments[$segmentName]
-		[pscustomobject]@{
-			Nome = $segmentName
-			Acao = { Show-FirstMenu -Items $collection }.GetNewClosure()
-		}
-	}
-
-	Show-FirstMenu -Items $segmentItems -PauseAfterAction:$false -IsRootMenu:$true
-}
-
 function Search-RamalPinTim {
-	param(
-		[Parameter(Mandatory=$true)][string]$LookupValue
-	)
+    
+	$username = (Get-ActiveUser).username
+
+	if ([string]::IsNullOrEmpty($username)) {
+		Write-Host "Não foi possível determinar o usuário ativo." -ForegroundColor Red
+		return $null
+	}
 
 	$ramalPath = "\\romulo.grupoaec.com.br\script_tim.$\Ramal_TIM\RamalP.txt"
-	$webResponse = Invoke-WebRequestSafe -Uri $ramalPath
-	if ($null -eq $webResponse) { return $null }
-	$resp = $webResponse.RawContent
-	Write-Host " Buscando ramal para '$LookupValue'..." -ForegroundColor Cyan
 
-	$lookupNormalized = $LookupValue.Trim()
-	$lookupPin = ($lookupNormalized -replace '\D', '')
-	if ($resp) {
-		$lines = $resp -split "`r?`n"
-
-		foreach ($line in $lines) {
-			if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-			$parts = $line.Split(',')
-			if ($parts.Count -lt 3) { continue }
-
-			$pinCandidate    = $parts[0].Trim().Trim([char]0xFEFF)
-			$ramalCandidate  = $parts[1].Trim()
-			$userCandidate   = $parts[2].Trim()
-
-			$pinCandidateNormalized = ($pinCandidate -replace '\D', '')
-			$isPinMatch = ($lookupPin.Length -gt 0 -and $lookupPin -eq $pinCandidateNormalized)
-			$isUserMatch = $lookupNormalized.Equals($userCandidate, [System.StringComparison]::OrdinalIgnoreCase)
-
-			if (-not ($isPinMatch -or $isUserMatch)) { continue }
-
-			if ($ramalCandidate -notmatch '^\d{7}$') { continue }
-
-			switch ($ramalCandidate.Substring(0, 3)) {
-				"312" { $resolvedSite = "BH" }
-				"382" { $resolvedSite = "MOC" }
-				default { continue }
-			}
-
-			return [pscustomobject]@{
-				Pin   = $pinCandidateNormalized
-				Ramal = $ramalCandidate
-				Site  = $resolvedSite
-			}
-		}
+	if (-not (Test-Path -Path "romulo.grupoaec.com.br")) {
+		Write-Host "Sem acesso ao caminho de rede interna"
+		return $null
+	}
+	if (-not (Test-Path -Path $ramalPath)) {
+		Write-Host "Arquivo de ramais não encontrado no caminho esperado: $ramalPath" -ForegroundColor Red
+		return $null
 	}
 
-	return $null
+	$username = $username.Trim().ToLower()
+
+    Write-Host "Buscando ramal para '$username'..." -ForegroundColor Cyan
+
+    $resp = Get-Content -Path $ramalPath
+
+    foreach ($line in $resp) {
+        $parts = $line -split ","
+        if ($parts.Count -ge 3) {
+            $lineUsername = $parts[2].Trim().ToLower()   # usuário está na 3ª coluna
+            if ($lineUsername -eq $username) {
+                return @{
+                    Ramal = $parts[0].Trim()
+                    Pin   = $parts[1].Trim()
+                }
+            }
+        }
+    }
+
+    Write-Host "Usuário '$username' não encontrado no arquivo." -ForegroundColor Yellow
+    return $null
 }
 
-#-----------------------------------Script Session-----------------------------------
-#-----------------------------------Scripts Gerais-----------------------------------
+
+#-------------------------------------------------------------Script Session----------------------------------------------------------
+#-------------------------------------------------------------Scripts Gerais----------------------------------------------------------
 $scriptsGeral = @(
 	[pscustomobject]@{
 		Nome = "Liberar ADM"
@@ -489,14 +323,14 @@ $scriptsGeral = @(
 			Write-Host " Ajustando permissões de administrador..." -ForegroundColor Cyan
 			Write-Host " Esta configuração não é eficaz em todos os sistemas pois não sobrepõe as políticas de grupo locais ou de domínio." -ForegroundColor Yellow
 			
-			Edit-Reg -Action "Remove" -Path "ADM:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
-            Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
-            Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Target "Item" 
-            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Type "DWord" -Value 3
-            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Type "DWord" -Value 0
-            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Type "DWord" -Value 1
-            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "PromptOnSecureDesktop" -Type "DWord" -Value 0
-            Edit-Reg -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableRegistryTools" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "ADM:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies" -Target "Item" 
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Target "Item" 
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Type "DWord" -Value 3
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "PromptOnSecureDesktop" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableRegistryTools" -Type "DWord" -Value 0
 
 			Write-Host " Permissões ajustadas!" -ForegroundColor Green
 		}
@@ -506,28 +340,31 @@ $scriptsGeral = @(
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
 			Stop-Process -Name chrome*, msedge*, iexplore*, concentr*, receiver*, redirector*, radeobj*, wfcrun32*, wfica32*, pnamain* -Force -ErrorAction SilentlyContinue
-			RunDll32.exe inetcpl.cpl,ClearMyTracksByProcess 255
+			RunDll32.exe inetcpl.cpl, ClearMyTracksByProcess 255
 
-			$user = Get-ActiveUser
-			$userDir = "C:\Users\$user"
+			$username = (Get-ActiveUser).username
+			$userDir = "C:\Users\$username"
 
-			Remove-FSItem -Path "$userDir\AppData\Local\Apps\2.0"
+			try {
+				Remove-Item -Path "$userDir\AppData\Local\Apps\2.0" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
 			function Clear-Folder($path) {
 				if (Test-Path $path) {
 					Remove-Item "$path\*" -Force -Recurse -ErrorAction SilentlyContinue
 				}
 			}
 
-			$user = Get-ActiveUser
-			$userPath = "C:\Users\$user"
 
 			$folders = @(
-				"$userPath\AppData\Local\Temp",
-				"$userPath\AppData\Local\Google\Chrome\User Data",
-				"$userPath\AppData\Local\Microsoft\Edge\User Data",
-				"$userPath\AppData\Local\Microsoft\Terminal Server Client\Cache",
-				"$userPath\AppData\Local\Citrix",
-				"$userPath\AppData\Roaming\ICAClient",
+				"$userDir\AppData\Local\Temp",
+				"$userDir\AppData\Local\Google\Chrome\User Data",
+				"$userDir\AppData\Local\Microsoft\Edge\User Data",
+				"$userDir\AppData\Local\Microsoft\Terminal Server Client\Cache",
+				"$userDir\AppData\Local\Citrix",
+				"$userDir\AppData\Roaming\ICAClient",
 				"$env:SystemRoot\Temp",
 				"$env:SystemDrive\Temp"
 			)
@@ -539,81 +376,88 @@ $scriptsGeral = @(
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Win10 > Win11"
+		Nome = "Aparência do Windows 11"
 		Acao = {
-			
-			Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
+			function Update-ExplorerColors {
+                if (-not ('Win32.NativeMethods' -as [type])) {
+                    Add-Type -Namespace Win32 -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class NativeMethods { [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult); }' -ErrorAction SilentlyContinue
+                }
 
-			function Restart-Explorer {
-				Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-				Start-Sleep -Seconds 2
-				Start-Process explorer.exe -ErrorAction SilentlyContinue
-			}
-
-            function Update-ExplorerColors {
-Add-Type -TypeDefinition @"
-	using System;
-	using System.Runtime.InteropServices;
-	public class Win32 {
-		[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)]
-		public static extern IntPtr SendMessageTimeout(
-			IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
-			uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-	}
-"@ -ErrorAction SilentlyContinue
-
-
-                $HWND_BROADCAST   = [IntPtr]0xffff
-                $WM_SETTINGCHANGE = 0x1A
-                $SMTO_ABORTIFHUNG = 0x2
                 $result = [IntPtr]::Zero
-
-                [void][Win32]::SendMessageTimeout(
-                    $HWND_BROADCAST,
-                    $WM_SETTINGCHANGE,
+                [void][Win32.NativeMethods]::SendMessageTimeout(
+                    [IntPtr]0xffff,
+                    0x1A,
                     [IntPtr]::Zero,
                     "ImmersiveColorSet",
-                    $SMTO_ABORTIFHUNG,
+                    0x2,
                     100,
                     [ref]$result
                 )
-				Stop-Process -Name explorer.exe -ErrorAction SilentlyContinue
-				Start-Process explorer.exe -ErrorAction SilentlyContinue
-            }
 
+                Get-Process -Name explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+                Start-Process explorer.exe -ErrorAction SilentlyContinue
+
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked" -Name "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}" -Type "String" -Value ""
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Target "Property" -Name "(default)" -Type "String" -Value ""
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarAl" -Type "DWord" -Value 0
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "ShowTaskViewButton" -Type "DWord" -Value 0
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarDa" -Type "DWord" -Value 0
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarMn" -Type "DWord" -Value 0
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarGlomLevel" -Type "DWord" -Value 2
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "MMTaskbarGlomLevel" -Type "DWord" -Value 2
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Target "Property" -Name "SearchboxTaskbarMode" -Type "DWord" -Value 0
+
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "AppsUseLightTheme" -Type "DWord" -Value 1
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "SystemUsesLightTheme" -Type "DWord" -Value 0
+                Update-ExplorerColors
+            }
+		}
+	}
+	[pscustomobject]@{
+		Nome = "Desempenho Windows 11/Debloat"
+		Acao = {
 			Stop-Process -Name Widgets -ErrorAction SilentlyContinue
 			Get-AppxPackage Microsoft.WidgetsPlatformRuntime -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 			Get-AppxPackage MicrosoftWindows.Client.WebExperience -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-			Restart-Explorer
 
-			Edit-Reg -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Type "DWord" -Value 1
 
-			Edit-Reg -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Type "DWord" -Value 1
-
-			Edit-Reg -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
-			Edit-Reg -Path "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
-			Edit-Reg -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowCopilotButton" -Type "DWord" -Value 0
-			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "IsCopilotAvailable" -Type "DWord" -Value 0
-			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "CopilotDisabledReason" -Type "String" -Value "IsEnabledForGeographicRegionFailed"
-			Edit-Reg -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsCopilot" -Name "AllowCopilotRuntime" -Type "DWord" -Value 0
-			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked" -Name "{CB3B0003-8088-4EDE-8769-8B354AB2FF8C}" -Type "String" -Value ""
-			Edit-Reg -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot\BingChat" -Name "IsUserEligible" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Path "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowCopilotButton" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "IsCopilotAvailable" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot" -Name "CopilotDisabledReason" -Type "String" -Value "IsEnabledForGeographicRegionFailed"
+			Invoke-Reg -Mode "Edit" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsCopilot" -Name "AllowCopilotRuntime" -Type "DWord" -Value 0
+			Invoke-Reg -Mode "Edit" -Path "HKLM:\SOFTWARE\Microsoft\Windows\Shell\Copilot\BingChat" -Name "IsUserEligible" -Type "DWord" -Value 0
 
 			Get-AppxPackage -AllUsers *Copilot* | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 			Get-AppxPackage -AllUsers Microsoft.MicrosoftOfficeHub | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 
 			try {
 				$appx = (Get-AppxPackage MicrosoftWindows.Client.CoreAI -ErrorAction Stop).PackageFullName
-				$sid = Get-ActiveUserSid
-				Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\EndOfLife\$sid\$appx" -Target "Item" | Out-Null
+				$sid = (Get-ActiveUser).sid
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\EndOfLife\$sid\$appx" -Target "Item" | Out-Null
 				Remove-AppxPackage $appx -ErrorAction SilentlyContinue
-			} catch {}
+			}
+			catch {}
 
 			if ($Env:OneDrive) { icacls $Env:OneDrive /deny "Administrators:(D,DC)" | Out-Null }
 			Start-Process "C:\Windows\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -Wait -ErrorAction SilentlyContinue
-			Stop-Process -Name FileCoAuth,Explorer -ErrorAction SilentlyContinue
-			Remove-FSItem -Path "$Env:LocalAppData\Microsoft\OneDrive"
-			Remove-FSItem -Path "C:\ProgramData\Microsoft OneDrive"
+			Stop-Process -Name FileCoAuth, Explorer -ErrorAction SilentlyContinue
+			try {
+				Remove-Item -Path "$Env:LocalAppData\Microsoft\OneDrive" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
+			try {
+				Remove-Item -Path "C:\ProgramData\Microsoft OneDrive" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
 			if ($Env:OneDrive) { icacls $Env:OneDrive /grant "Administrators:(D,DC)" | Out-Null }
 			Set-Service -Name OneSyncSvc -StartupType Disabled -ErrorAction SilentlyContinue
 			Start-Process explorer.exe -ErrorAction SilentlyContinue
@@ -629,152 +473,23 @@ Add-Type -TypeDefinition @"
 			) | ForEach-Object {
 				Get-AppxPackage -AllUsers $_ | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 			}
-
-			Edit-Reg -Action "Create" -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Target "Property" -Name "(default)" -Type "String" -Value ""
-			Restart-Explorer
-
-			Edit-Reg -Action "Create" -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Target "Property" -Name "TaskbarAl" -Type "DWord" -Value 1
-			Restart-Explorer
-
-			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "AppsUseLightTheme" -Type "DWord" -Value 1
-			Edit-Reg -Action "Create" -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Target "Property" -Name "SystemUsesLightTheme" -Type "DWord" -Value 0
-			Update-ExplorerColors
 		}
 	}
 	[PSCustomObject]@{
 		Nome = "Desbloquear Navegadores"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
-			Edit-Reg -Action "Remove" -Path "HKLM:\Software\Google\Chrome" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKLM:\Software\Microsoft\Edge" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Google\Chrome" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKCU:\Software\Microsoft\Edge" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
-			Edit-Reg -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKLM:\Software\Google\Chrome" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKLM:\Software\Microsoft\Edge" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKCU:\Software\Google\Chrome" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKCU:\Software\Microsoft\Edge" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Microsoft\Edge" -Target "Item"
+			Invoke-Reg -Mode "Edit" -Action "Remove" -Path "HKCU:\SOFTWARE\Policies\Google\Chrome" -Target "Item"
 
 			Stop-Process -Name chrome*, msedge* -Force -ErrorAction SilentlyContinue
 			Write-Host " Configurações de navegador resetadas." -ForegroundColor Green
-		}
-	}
-	[pscustomobject]@{
-		Nome = "Ajusta ToLogado"
-		Acao = {
-			if (-not (Get-SSCredential)) { return }
-
-			$dominio = "grupoaec.com.br"
-			$servers = "MOC","AIR","CPV","MRO","RJO","ORI"
-
-			$selectedSite = $null
-			Select-FromMenu -Options $servers -OutputVariable ([ref]$selectedSite) -Prompt "Selecione o site:"
-
-			if (!$selectedSite) { 
-				Write-Host " Nenhum servidor selecionado. Operação cancelada." -ForegroundColor Yellow		
-				return
-			}
-
-			Write-Host " Configurando ToLogado $selectedSite" -ForegroundColor Cyan
-			Write-Host ""
-
-			Write-Host " Validando conexão com a rede interna..." -ForegroundColor Cyan
-			Write-Host ""
-			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
-			if (-not $testMinhaAec) {
-				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
-				reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v SearchList /t REG_SZ /d grupoaec.com.br /f
-				ipconfig /registerdns
-				Start-Sleep -Seconds 2
-
-				if (-not $testMinhaAec) {
-					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
-					return
-				}
-			}
-
-			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
-			Write-Host ""
-			$servers = "DGT_PUBL_$selectedSite", "AZURE-SRV01"
-
-			$bestServer = $servers | ForEach-Object {
-				try {
-					$pingResult = Test-Connection $_ -Count 2 -ErrorAction Stop | Measure-Object ResponseTime -Average
-					if ($pingResult) {
-						$r = $pingResult.Average
-						[PSCustomObject]@{Server=$_; Latency=$r}
-					}
-				} catch {}
-			} | Sort-Object Latency | Select-Object -First 1
-
-            if ($bestServer -and $bestServer.Server -ne "AZURE-SRV01") {
-                $tologadoPath = "\\$($bestServer.Server)\to_logado.$\Squirrel\setup.exe"
-            } else {
-                $tologadoPath = "\\AZURE-SRV01\tologado_ho.$\Squirrel\setup.exe"
-            }
-
-			Write-Host (" Servidor selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
-            
-			Get-Process aec*,self*,setup*,chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-			$user = Get-ActiveUser
-
-			Write-Host " Preparando arquivos..." -ForegroundColor Cyan
-            Remove-Item "C:\aec\setup.exe" -Force -ErrorAction SilentlyContinue
-            Remove-Item "C:\Users\$user\Desktop\tô logado*" -Force -ErrorAction SilentlyContinue
-            Remove-Item "C:\Users\$user\AppData\Local\ToLogado*" -Force -ErrorAction SilentlyContinue
-
-			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
-            New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
-			if (-not (Copy-ItemSafe -Path $tologadoPath -Destination "C:\AEC\Setup_ToLogado.exe")) { return }
-
-			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
-            $WshShell = New-Object -ComObject WScript.Shell
-            $Shortcut = $WshShell.CreateShortcut("C:\Users\$user\Desktop\Setup_ToLogado.lnk")
-            $Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
-            $Shortcut.Save()
-			
-			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
-			Write-Host " Configuração concluída!" -ForegroundColor Green
-		}
-	}
-	[PSCustomObject]@{
-		Nome = "Desinstalar Chrome"
-		Acao = {
-			if (-not (Get-SSCredential)) { return }	
-			Stop-Process -Name "chrome*" -Force -ErrorAction SilentlyContinue
-			Stop-Process -Name "Google*" -Force -ErrorAction SilentlyContinue
-			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
-			Stop-Process -Name "setup*" -Force -ErrorAction SilentlyContinue
-
-			wmic product where "name like 'Google Chrome%%'" call uninstall /nointeractive | Out-Null
-
-			if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
-				$chrome64ver = (wmic datafile where "name='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
-				& "C:\Program Files\Google\Chrome\Application\$chrome64ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
-				Remove-Item "C:\Program Files\Google" -Recurse -Force
-			}
-
-			if (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
-				$chrome86ver = (wmic datafile where "name='C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
-				& "C:\Program Files (x86)\Google\Chrome\Application\$chrome86ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
-				Remove-Item "C:\Program Files (x86)\Google" -Recurse -Force
-			}
-
-			Start-Sleep -Seconds 5
-
-			if (-not (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe")) {
-				if (-not (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")) {
-					Write-Host " Google Chrome desinstalado com sucesso." -ForegroundColor Green
-				} else {
-					Remove-Item "C:\Program Files (x86)\Google\Chrome" -Recurse -Force
-					Start-Sleep -Seconds 5
-				}
-			} else {
-				Start-Sleep -Seconds 5
-			}
-
-			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
-
 		}
 	}
 	[PSCustomObject]@{
@@ -817,8 +532,8 @@ Add-Type -TypeDefinition @"
 			if (-not (Get-SSCredential)) { return }	
 
 			Write-Host " Configurando Modo Internet Explorer no Microsoft Edge..." -ForegroundColor Cyan
-			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationLevel" -Type "DWord" -Value 1
-			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationTestingAllowed" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationLevel" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationTestingAllowed" -Type "DWord" -Value 1
 
 			Write-Host " Criando XML de sites em C:\edge_iemode..." -ForegroundColor Cyan
 			$folder = "C:\edge_iemode"
@@ -883,7 +598,7 @@ Add-Type -TypeDefinition @"
 			Write-Host " Ajustando registros do Microsoft Edge..." -ForegroundColor Cyan
 
 			$siteListUri = "file:///C:/edge_iemode/iemode.xml"
-			Edit-Reg -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationSiteList" -Type "String" -Value $siteListUri
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name "InternetExplorerIntegrationSiteList" -Type "String" -Value $siteListUri
 
 			Stop-Process -Name msedge* -Force -ErrorAction SilentlyContinue
 
@@ -898,7 +613,8 @@ Add-Type -TypeDefinition @"
 				$shortcutPath = "$env:PUBLIC\Desktop\$Name.lnk"
 				$edgeExe = if (Test-Path "C:\Program Files\Microsoft\Edge\Application\msedge.exe") {
 					"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-				} else {
+				}
+				else {
 					"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 				}
 				$WshShell = New-Object -ComObject WScript.Shell	
@@ -937,7 +653,139 @@ Add-Type -TypeDefinition @"
 	}
 )
 
-#------------------------------------Scripts Claro-----------------------------------
+#----------------------------------------------------------Scripts Programas----------------------------------------------------------
+$scriptsProgramas = @(
+	[pscustomobject]@{
+		Nome = "Ajusta ToLogado"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }
+
+			$servers = "MOC", "AIR", "CPV", "MRO", "RJO", "ORI"
+
+			$selectedSite = $null
+			Select-FromMenu -Options $servers -OutputVariable ([ref]$selectedSite) -Prompt "Selecione o site:"
+
+			if (!$selectedSite) { 
+				Write-Host " Nenhum servidor selecionado. Operação cancelada." -ForegroundColor Yellow		
+				return
+			}
+
+			Write-Host " Configurando ToLogado $selectedSite" -ForegroundColor Cyan
+			Write-Host ""
+
+			Write-Host " Validando conexão com a rede interna..." -ForegroundColor Cyan
+			Write-Host ""
+			$testMinhaAec = Test-Connection -ComputerName "minhaaec" -Count 2 -Quiet -ErrorAction SilentlyContinue
+			if (-not $testMinhaAec) {
+				Write-Host " Ajustando configuração de DNS..." -ForegroundColor Cyan
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "SearchList" -Type "String" -Value "grupoaec.com.br"
+				ipconfig /registerdns
+				Start-Sleep -Seconds 2
+
+				if (-not $testMinhaAec) {
+					Write-Host " Não foi possível validar a rede interna, verifique a VPN." -ForegroundColor Yellow
+					return
+				}
+			}
+
+			Write-Host " Selecionando o melhor servidor..." -ForegroundColor Cyan
+			Write-Host ""
+			$servers = "DGT_PUBL_$selectedSite", "AZURE-SRV01"
+
+			$bestServer = $servers | ForEach-Object {
+				try {
+					$pingResult = Test-Connection $_ -Count 2 -ErrorAction Stop | Measure-Object ResponseTime -Average
+					if ($pingResult) {
+						$r = $pingResult.Average
+						[PSCustomObject]@{Server = $_; Latency = $r }
+					}
+				}
+				catch {}
+			} | Sort-Object Latency | Select-Object -First 1
+
+			if ($bestServer -and $bestServer.Server -ne "AZURE-SRV01") {
+				$tologadoPath = "\\$($bestServer.Server)\to_logado.$\Squirrel\setup.exe"
+			}
+			else {
+				$tologadoPath = "\\AZURE-SRV01\tologado_ho.$\Squirrel\setup.exe"
+			}
+
+			Write-Host (" Selecionado: {0} (latência média: {1} ms)" -f $bestServer.Server, $bestServer.Latency) -ForegroundColor Green
+            
+			Get-Process aec*, self*, setup*, chromed* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+			$username = (Get-ActiveUser).username
+			$userDir = "C:\Users\$username"
+
+			Write-Host " Preparando arquivos..." -ForegroundColor Cyan
+			Remove-Item "C:\aec\setup.exe" -Force -ErrorAction SilentlyContinue
+			Remove-Item "$userDir\Desktop\tô logado*" -Force -ErrorAction SilentlyContinue
+			Remove-Item "$userDir\AppData\Local\ToLogado*" -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Copiando instalador para C:\AEC..." -ForegroundColor Cyan
+			New-Item -Path "C:\AEC" -ItemType Directory -Force | Out-Null
+			$pathToCheck = if ($tologadoPath -like '*`**') { Split-Path -Path $tologadoPath -Parent } else { $tologadoPath }
+			if ($tologadoPath -like '\\*' -and -not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) {
+				Write-Host "Sem acesso ao caminho de rede interna"
+				return
+			}
+			Copy-Item -Path $tologadoPath -Destination "C:\AEC\Setup_ToLogado.exe" -Force -ErrorAction SilentlyContinue
+
+			Write-Host " Criando atalho na área de trabalho..." -ForegroundColor Cyan
+			$WshShell = New-Object -ComObject WScript.Shell
+			$Shortcut = $WshShell.CreateShortcut("$userDir\Desktop\Setup_ToLogado.lnk")
+			$Shortcut.TargetPath = "C:\AEC\Setup_ToLogado.exe"
+			$Shortcut.Save()
+			
+			Write-Host " Execute o atalho 'Setup_ToLogado' na área de trabalho para iniciar a instalação." -ForegroundColor Green
+			Write-Host " Configuração concluída!" -ForegroundColor Green
+		}
+	}
+	[PSCustomObject]@{
+		Nome = "Desinstalar Chrome"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Stop-Process -Name "chrome*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "Google*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+			Stop-Process -Name "setup*" -Force -ErrorAction SilentlyContinue
+
+			wmic product where "name like 'Google Chrome%%'" call uninstall /nointeractive | Out-Null
+
+			if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
+				$chrome64ver = (wmic datafile where "name='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				& "C:\Program Files\Google\Chrome\Application\$chrome64ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
+				Remove-Item "C:\Program Files\Google" -Recurse -Force
+			}
+
+			if (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
+				$chrome86ver = (wmic datafile where "name='C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'" get Version /value | findstr "=").Split("=")[1]
+				& "C:\Program Files (x86)\Google\Chrome\Application\$chrome86ver\Installer\setup.exe" --uninstall --multi-install --chrome --system-level --force-uninstall
+				Remove-Item "C:\Program Files (x86)\Google" -Recurse -Force
+			}
+
+			Start-Sleep -Seconds 5
+
+			if (-not (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe")) {
+				if (-not (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")) {
+					Write-Host " Google Chrome desinstalado com sucesso." -ForegroundColor Green
+				}
+				else {
+					Remove-Item "C:\Program Files (x86)\Google\Chrome" -Recurse -Force
+					Start-Sleep -Seconds 5
+				}
+			}
+			else {
+				Start-Sleep -Seconds 5
+			}
+
+			Stop-Process -Name "MsiExec*" -Force -ErrorAction SilentlyContinue
+
+		}
+	}
+)
+
+#-------------------------------------------------------------Scripts Claro----------------------------------------------------------
 $scriptsClaro = @(
 	[pscustomobject]@{
 		Nome = "Ajusta Atalhos"
@@ -951,9 +799,22 @@ $scriptsClaro = @(
 				return
 			}
 
-			$user = Get-ActiveUser
-			$userDir = "C:\users\$user\"
+			$username = (Get-ActiveUser).username
+			$userDir = "C:\Users\$username\"
 			$publicDesktop = "$env:PUBLIC\Desktop"
+
+			try {
+				Remove-Item -Path "$userDir\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
+			try {
+				Remove-Item -Path "$publicDesktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
 
 			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
 
@@ -974,65 +835,41 @@ $scriptsClaro = @(
 			switch ($operacao) {
 				"AIR" {
 					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"PDI" {
 					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"CPV" {
 					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_ClaroEbt\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Ajusta Proxy Claro"
+		Nome = "Ajusta Proxy"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
 
+			Write-Host " Configurando proxy para Claro..." -ForegroundColor Cyan
+
 			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-			if (-not (Test-Path $proxyRegPath)) {
-				New-Item -Path $proxyRegPath -Force | Out-Null
-			}
-			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
-			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
-			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
 
-			$proxyModeOptions = @("Automático", "Manual")
-			$proxyModeChoice = $null
-			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy Claro:"
+			$serverValue = "10.18.4.20:3128"
+			$overrideValue = "spsweb*;*mercury*;*cobranca.claro*;webmail.aec.*;*gestordecobranca*;*cec*;cap.*;caphml.*;*.salesforce.com;*.salesforceliveagent.com;*.force.com;*incontact.com*;*.niceincontact.com*;*nice*;*cc.claro.com.br*;servbus.netservicos.com.br;netsmsapp*;*netsales*;*.claroideias.*;*.rjnet.com.br;*.sgdwebce.*;10.11.*;10.12.*;10.16.*;10.19.*;10.5.*;10.64.*;172.*;187.28.*;192.168.*;5.50.*;alfeu;am.claro.com.br;ativacao;ativacaob.claro.com.br;autocontrole;cachoeiras;cantagalo;cem.claro.com.br;cemi*;centraldecobertura;citrixgwcc*;claro.atenalms.com.br;clarobonus.*;clarobonusb.*;clarogestoronline*;claro-gestoronline.*;clarohelpdesk;claromensagemb.claro.com.br;clarotorpedoweb.*;clarounifica;consultafaturas;contaonline2.claro.com.br;contaonlinepf2.claro.com.br;contingenciaoffline.*;cpc.claro.com.br;ecob.claro.com.br;edoc11g.claro.com.br;empresas.claro.com.br;extratogsm;feu.claro.com.br;ged.claro.com.br;gestaodeconteudo;ggd.claro.com.br;mapacobertura*;idm.claro.com.br;idpinterno.claro.com.br;intranetdeatendimento.claro.com.br;intranetnacional;iw.claro.com.br;lmsclaro;mail.claro.com.br;mar.*;mc;migracaob;migracaob.claro.com.br;minhaaec;in.netservicos.corp;*mtaweb*;mti;oappaut.claro.com.br;owa.claro.com.br;pesquisacob.claro.com.br;pilardosul;pit;portaldeatendimento.claro.com.br;ps8port;ps8web;pugmil*;rjux0105;sgdln.claro.com.br;sgds1.claro.com.br;sgds2.claro.com.br;siga.claro.com.br;sigab.claro.com.br;spaceplanning-dev.azure-devices.net;spnadmin;spntsd01;taguai*;taprd2;ted.claro.com.br;terceiros.embratel.com.br;thexpress;totem;vipipcc.claro.com.br;webportal.nowonline.com.br;websan.claro.com.br;*wppnacional.claro.com.br;auto-controle;microcredito.claro.com.br;*.grupoaec.com.br;*.grupoaec.local;*.corp.clarobr;*clarosgvas.mobicare.com.br*;*.ilk.*;updateasc.netservicos.*;*esrccenter*;nmcol.*;claroclube*;sgd*;chat.claro*;mapacobertura*;*.cyf.*;hotptb*;eforce*;ipc.claro.com.br;ipchml.claro.com.br;*.duosecurity.com;vendasapp.*;authvendasapp.*;*parc.claro.com.br;*ativacaohomolmfa*;clarospa.cloud.com;*.cloud.com;*.citrixdata.com;<local>"
 
-			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
-				Write-Host " Operação cancelada." -ForegroundColor Yellow
-				return
-			}
-
-			Write-Host " Configurando proxy para a Claro..." -ForegroundColor Cyan
-
-			if ($proxyModeChoice -eq "Automático") {
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "10.18.4.20:3128"
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "spsweb*;*mercury*;*cobranca.claro*;webmail.aec.*;*gestordecobranca*;*cec*;cap.*;caphml.*;*.salesforce.com;*.salesforceliveagent.com;*.force.com;*incontact.com*;*.niceincontact.com*;*nice*;*cc.claro.com.br*;servbus.netservicos.com.br;netsmsapp*;*netsales*;*.claroideias.*;*.rjnet.com.br;*.sgdwebce.*;10.11.*;10.12.*;10.16.*;10.19.*;10.5.*;10.64.*;172.*;187.28.*;192.168.*;5.50.*;alfeu;am.claro.com.br;ativacao;ativacaob.claro.com.br;autocontrole;cachoeiras;cantagalo;cem.claro.com.br;cemi*;centraldecobertura;citrixgwcc*;claro.atenalms.com.br;clarobonus.*;clarobonusb.*;clarogestoronline*;claro-gestoronline.*;clarohelpdesk;claromensagemb.claro.com.br;clarotorpedoweb.*;clarounifica;consultafaturas;contaonline2.claro.com.br;contaonlinepf2.claro.com.br;contingenciaoffline.*;cpc.claro.com.br;ecob.claro.com.br;edoc11g.claro.com.br;empresas.claro.com.br;extratogsm;feu.claro.com.br;ged.claro.com.br;gestaodeconteudo;ggd.claro.com.br;mapacobertura*;idm.claro.com.br;idpinterno.claro.com.br;intranetdeatendimento.claro.com.br;intranetnacional;iw.claro.com.br;lmsclaro;mail.claro.com.br;mar.*;mc;migracaob;migracaob.claro.com.br;minhaaec;in.netservicos.corp;*mtaweb*;mti;oappaut.claro.com.br;owa.claro.com.br;pesquisacob.claro.com.br;pilardosul;pit;portaldeatendimento.claro.com.br;ps8port;ps8web;pugmil*;rjux0105;sgdln.claro.com.br;sgds1.claro.com.br;sgds2.claro.com.br;siga.claro.com.br;sigab.claro.com.br;spaceplanning-dev.azure-devices.net;spnadmin;spntsd01;taguai*;taprd2;ted.claro.com.br;terceiros.embratel.com.br;thexpress;totem;vipipcc.claro.com.br;webportal.nowonline.com.br;websan.claro.com.br;*wppnacional.claro.com.br;auto-controle;microcredito.claro.com.br;*.grupoaec.com.br;*.grupoaec.local;*.corp.clarobr;*clarosgvas.mobicare.com.br*;*.ilk.*;updateasc.netservicos.*;*esrccenter*;nmcol.*;claroclube*;sgd*;chat.claro*;mapacobertura*;*.cyf.*;hotptb*;eforce*;ipc.claro.com.br;ipchml.claro.com.br;*.duosecurity.com;vendasapp.*;authvendasapp.*;*parc.claro.com.br;*ativacaohomolmfa*;clarospa.cloud.com;*.cloud.com;*.citrixdata.com;<local>"
-				Write-Host " Configuração concluída!" -ForegroundColor Green
-				return
-			}
-
-			$manualValues = Show-ProxyForm `
-				-CurrentProxyEnable $currentProxyEnable `
-				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
-				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
-
-			if ($null -eq $manualValues) {
-				Write-Host " Operação cancelada." -ForegroundColor Yellow
-				return
-			}
-
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $serverValue
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $overrideValue
 
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
@@ -1055,15 +892,18 @@ $scriptsClaro = @(
 			switch ($operacao) {
 				"AIR" {
 					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"PDI" {
 					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Workstation\Host\hosts"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"CPV" {
 					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Workstation\Host_HO\hosts"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
@@ -1093,7 +933,7 @@ $scriptsClaro = @(
 				New-Item -ItemType Directory -Path $folder | Out-Null
 			}
 
-$ca01Content = @"
+			$ca01Content = @"
 -----BEGIN CERTIFICATE-----
 MIIFhTCCA22gAwIBAgIQQ8DtHS2h8rVN0y6cDPCPYjANBgkqhkiG9w0BAQsFADBJ
 MRcwFQYKCZImiZPyLGQBGRYHY2xhcm9icjEUMBIGCgmSJomT8ixkARkWBGNvcnAx
@@ -1128,7 +968,7 @@ eprRx/8kxSOa3nQo5aQRemfD23qs1FqdSBuzTxP+Xr5AjwEdDihvwuu0V2488NWf
 -----END CERTIFICATE-----
 "@
 			
-$ca02Content = @"
+			$ca02Content = @"
 -----BEGIN CERTIFICATE-----
 MIIIBzCCBe+gAwIBAgITGAAA5aPiJq0+xH8cewAAAADlozANBgkqhkiG9w0BAQsF
 ADBJMRcwFQYKCZImiZPyLGQBGRYHY2xhcm9icjEUMBIGCgmSJomT8ixkARkWBGNv
@@ -1176,7 +1016,7 @@ FtbTsxs0AMoZjzVrLLe4i0AyeqNIY/47L8PWLFdGM78PioKk/tq+V1JnzQ==
 -----END CERTIFICATE-----
 "@
 
-$rootClaroContent = @"
+			$rootClaroContent = @"
 -----BEGIN CERTIFICATE-----
 MIIFmTCCA4GgAwIBAgIQEpRc3PTQMrhLv220Ul/gUzANBgkqhkiG9w0BAQsFADBf
 MRIwEAYKCZImiZPyLGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTATBgoJ
@@ -1211,7 +1051,7 @@ A48pHfymmjuc1KBWNcLx/h4e9cVpDWgkWDJ9L/+xrMJ71EJ2nL8VhJME0kXZXFxo
 -----END CERTIFICATE-----
 "@
 
-$subClaroContent = @"
+			$subClaroContent = @"
 -----BEGIN CERTIFICATE-----
 MIIHaDCCBVCgAwIBAgITagAAAATbMr24lw1zAgAAAAAABDANBgkqhkiG9w0BAQsF
 ADBfMRIwEAYKCZImiZPyLGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTAT
@@ -1256,7 +1096,7 @@ whdZ5PRXQVskvoVSOfnoI9hTZthlJf8d2k2DPQ==
 -----END CERTIFICATE-----
 "@
 
-$authWppContent = @"
+			$authWppContent = @"
 -----BEGIN CERTIFICATE-----
 MIIH+DCCBeCgAwIBAgITIwAAZ8gLVuHMXKFYMAABAABnyDANBgkqhkiG9w0BAQsF
 ADBmMRIwEAYKCZImiZPyLGQBGRYCYnIxEzARBgoJkiaJk/IsZAEZFgNjb20xFTAT
@@ -1304,7 +1144,7 @@ RzW5icWnQ49D4uMVd1edpoedxpRtQRmxGfa1Hw==
 -----END CERTIFICATE-----
 "@
 
-$WppContent = @"
+			$WppContent = @"
 -----BEGIN CERTIFICATE-----
 MIIHPDCCBSSgAwIBAgITTQJjLK+t/Z2pNotg9wACAmMsrzANBgkqhkiG9w0BAQsF
 ADBJMRcwFQYKCZImiZPyLGQBGRYHY2xhcm9icjEUMBIGCgmSJomT8ixkARkWBGNv
@@ -1349,27 +1189,27 @@ S3IkMJlB1iDbOhwNJNRgN95eAGbDgW4NahgrSy26EjQ=
 
 "@
 
-		$ca01Content | Set-Content -Path "$folder\corp-CAPKI01-CA.crt" -Encoding UTF8
-		$ca02Content | Set-Content -Path "$folder\corp-CAPKI02-CA.crt" -Encoding UTF8
-		$rootClaroContent | Set-Content -Path "$folder\Claro Root CA - Novo.cer" -Encoding UTF8
-		$subClaroContent | Set-Content -Path "$folder\Claro Subordinate CA - Novo.cer" -Encoding UTF8
-		$authWppContent | Set-Content -Path "$folder\authwppnacional.claro.com.br.cer" -Encoding UTF8
-		$WppContent | Set-Content -Path "$folder\wppnacional.claro.com.br.cer" -Encoding UTF8
+			$ca01Content | Set-Content -Path "$folder\corp-CAPKI01-CA.crt" -Encoding UTF8
+			$ca02Content | Set-Content -Path "$folder\corp-CAPKI02-CA.crt" -Encoding UTF8
+			$rootClaroContent | Set-Content -Path "$folder\Claro Root CA - Novo.cer" -Encoding UTF8
+			$subClaroContent | Set-Content -Path "$folder\Claro Subordinate CA - Novo.cer" -Encoding UTF8
+			$authWppContent | Set-Content -Path "$folder\authwppnacional.claro.com.br.cer" -Encoding UTF8
+			$WppContent | Set-Content -Path "$folder\wppnacional.claro.com.br.cer" -Encoding UTF8
 		
-		Import-Certificate -FilePath "$folder\corp-CAPKI01-CA.crt" -CertStoreLocation Cert:\LocalMachine\Root
-		Import-Certificate -FilePath "$folder\Claro Root CA - Novo.cer" -CertStoreLocation Cert:\LocalMachine\Root
+			Import-Certificate -FilePath "$folder\corp-CAPKI01-CA.crt" -CertStoreLocation Cert:\LocalMachine\Root
+			Import-Certificate -FilePath "$folder\Claro Root CA - Novo.cer" -CertStoreLocation Cert:\LocalMachine\Root
 
-		Import-Certificate -FilePath "$folder\corp-CAPKI02-CA.crt" -CertStoreLocation Cert:\LocalMachine\CA
-		Import-Certificate -FilePath "$folder\Claro Subordinate CA - Novo.cer" -CertStoreLocation Cert:\LocalMachine\CA
+			Import-Certificate -FilePath "$folder\corp-CAPKI02-CA.crt" -CertStoreLocation Cert:\LocalMachine\CA
+			Import-Certificate -FilePath "$folder\Claro Subordinate CA - Novo.cer" -CertStoreLocation Cert:\LocalMachine\CA
 
-		Import-Certificate -FilePath "$folder\wppnacional.claro.com.br.cer" -CertStoreLocation Cert:\LocalMachine\CA
-		Import-Certificate -FilePath "$folder\authwppnacional.claro.com.br.cer" -CertStoreLocation Cert:\LocalMachine\CA
+			Import-Certificate -FilePath "$folder\wppnacional.claro.com.br.cer" -CertStoreLocation Cert:\LocalMachine\CA
+			Import-Certificate -FilePath "$folder\authwppnacional.claro.com.br.cer" -CertStoreLocation Cert:\LocalMachine\CA
 
 		}
 	}
 )
 
-#--------------------------------------Scripts Oi------------------------------------
+#-------------------------------------------------------------Scripts Oi-------------------------------------------------------------
 $scriptsOi = @(
 	[pscustomobject]@{
 		Nome = "Ajusta Atalhos"
@@ -1385,12 +1225,22 @@ $scriptsOi = @(
 				return
 			}
 
-			$user = Get-ActiveUser
-			$userDir = "C:\users\$user\"
+			$username = (Get-ActiveUser).username
+			$userDir = "C:\users\$username\"
 			$publicDesktop = "$env:PUBLIC\Desktop"
 
-			Remove-FSItem -Path "$userDir\Desktop\*"
-			Remove-FSItem -Path "$publicDesktop\*"
+			try {
+				Remove-Item -Path "$userDir\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
+			try {
+				Remove-Item -Path "$publicDesktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
 			
 			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
 
@@ -1411,63 +1261,35 @@ $scriptsOi = @(
 			switch ($operacao) {
 				"JRE" {
 					$networkPath = "\\calais.grupoaec.com.br\script_oi.$\Lnk_Desktop_Bko\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"CPV" {
 					$networkPath = "\\camila2.grupoaec.com.br\script_oi.$\Segmentos\Oi_Total_BackOffice\Lnk_Desktop\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Ajusta Proxy Oi/Nio"
+		Nome = "Ajusta Proxy"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
 
-			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-			if (-not (Test-Path $proxyRegPath)) {
-				New-Item -Path $proxyRegPath -Force | Out-Null
-			}
-			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
-			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
-			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
-
-			$proxyModeOptions = @("Automático", "Manual")
-			$proxyModeChoice = $null
-			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy TIM:"
-
-			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
-				Write-Host " Operação cancelada." -ForegroundColor Yellow
-				return
-			}
-
 			Write-Host " Configurando proxy para a Oi/Nio..." -ForegroundColor Cyan
 
-			if ($proxyModeChoice -eq "Automático") {
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.134:8080"
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "*.interno.srv.br;192.168.*;10.32.208.*;10.*;*.telemar;arsweb;oiatendeintegracao;minhaaec;minhaaec.grupoaec.com.br;*.intranet;oisistemas.extranet;sfa.oi.net.br;oilegal;saspx15m.brasiltelecom.com.br;*.grupoaec.com.br;*.grupoaec.local;*.local.srv.br;oisistemas.oi.net.br;*.interno.srv.br;spaceplanning-dev.azure-devices.net;*.gcp.nio;nioaplicacoes.niointernet.app.br;elroy.apps.ocpoi.oi.intranet;logincorp.local.srv.br;<local>"
-				Write-Host " Configuração concluída!" -ForegroundColor Green
-				return
-			}
+			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
-			$manualValues = Show-ProxyForm `
-				-CurrentProxyEnable $currentProxyEnable `
-				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
-				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
+			$serverValue = "192.168.66.134:8080"
+			$overrideValue = "*.interno.srv.br;192.168.*;10.32.208.*;10.*;*.telemar;arsweb;oiatendeintegracao;minhaaec;minhaaec.grupoaec.com.br;*.intranet;oisistemas.extranet;sfa.oi.net.br;oilegal;saspx15m.brasiltelecom.com.br;*.grupoaec.com.br;*.grupoaec.local;*.local.srv.br;oisistemas.oi.net.br;*.interno.srv.br;spaceplanning-dev.azure-devices.net;*.gcp.nio;nioaplicacoes.niointernet.app.br;elroy.apps.ocpoi.oi.intranet;logincorp.local.srv.br;<local>"
 
-			if ($null -eq $manualValues) {
-				Write-Host " Operação cancelada." -ForegroundColor Yellow
-				return
-			}
-
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
-
-			Write-Host " Configuração concluída!" -ForegroundColor Green
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $serverValue
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $overrideValue
 		}
 	}
 	[pscustomobject]@{
@@ -1488,11 +1310,13 @@ $scriptsOi = @(
 			switch ($operacao) {
 				"CPV" {
 					$networkPath = "\\camila2.grupoaec.com.br\script_oi.$\Workstation\Host\hosts"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"JRE" {
 					$networkPath = "\\calais.grupoaec.com.br\script_oi.$\Host\hosts"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
@@ -1500,20 +1324,20 @@ $scriptsOi = @(
 	}
 )
 
-#--------------------------------------Scripts TIM-----------------------------------
+#-------------------------------------------------------------Scripts TIM-------------------------------------------------------------
 $scriptsTim = @(
-    [pscustomobject]@{
-        Nome = "Fechar Cisco/CallControl"
-        Acao = {
-            if (-not (Get-SSCredential)) { return }	
-            Write-Host " Fechando processos..." -ForegroundColor Cyan
+	[pscustomobject]@{
+		Nome = "Fechar Cisco/CallControl"
+		Acao = {
+			if (-not (Get-SSCredential)) { return }	
+			Write-Host " Fechando processos..." -ForegroundColor Cyan
 
-            Get-Process -Name @('cis*','mb*','*hide*','comm*','2comm*') -ErrorAction SilentlyContinue |
-                Stop-Process -Force -ErrorAction SilentlyContinue
+			Get-Process -Name @('cis*', 'mb*', '*hide*', 'comm*', '2comm*') -ErrorAction SilentlyContinue |
+			Stop-Process -Force -ErrorAction SilentlyContinue
 
-            Write-Host " Finalizado!" -ForegroundColor Green
-        }
-    }
+			Write-Host " Finalizado!" -ForegroundColor Green
+		}
+	}
 	[pscustomobject]@{
 		Nome = "Configura Cisco"
 		Acao = {
@@ -1521,35 +1345,19 @@ $scriptsTim = @(
 
 			$cisoRegPath32 = "HKLM:\SOFTWARE\WOW6432Node\Cisco Systems, Inc.\Cisco IP Communicator"
 			$ramal = $null
-			$site = $null
 
-			$user = (Read-Host "Informe o PIN ou usuário").Trim()
-
-			$searchResult = Search-RamalPinTim -LookupValue $user
-			if ($searchResult) {
-				$ramal = $searchResult.Ramal
-				$site = $searchResult.Site
+			$ramalInfo = Search-RamalPinTim
+			if ($ramalInfo) {
+				$ramal = $ramalInfo.Ramal
 			}
 
 			if ([string]::IsNullOrEmpty($ramal)) {
-				Write-Host " Login/PIN não localizado." -ForegroundColor Yellow
-				
-				$retryOptions = @("Tentar novamente", "Digitar manualmente")
-				$retryChoice = $null
-				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o ramal manualmente?"
-
-				if ($retryChoice -eq "Tentar novamente") {
-					$user = (Read-Host " Informe o PIN ou usuário").Trim()
-					$searchResult = Search-RamalPinTim -LookupValue $user
-					if ($searchResult) {
-						$ramal = $searchResult.Ramal
-						$site = $searchResult.Site
-					}
-				}
+				Write-Host " Login/PIN não localizado. Digite manualmente." -ForegroundColor Yellow
 			}
-			while ([string]::IsNullOrEmpty($site)) {
+
+			while ([string]::IsNullOrEmpty($ramal)) {
 				if ([string]::IsNullOrEmpty($ramal)) {
-					$ramal = Read-Host " Ramal"
+					$ramal = Read-Host " Digite o Ramal"
 				}
 				
 				if ($ramal -notmatch '^\d{7}$') {
@@ -1558,23 +1366,29 @@ $scriptsTim = @(
 					continue
 				}
 
-				$site = Get-TimSiteFromRamal -Ramal $ramal
-				if ([string]::IsNullOrEmpty($site)) {
-					Write-Host " Ramal inválido. Ramal TIM começa com 312 ou 382." -ForegroundColor Red
+				if ($ramal.StartsWith("312")) {
+					$site = "BH"
+				}
+				elseif ($ramal.StartsWith("382")) {
+					$site = "MOC"
+				} else {
+					Write-Host " Ramal inválido. Ramal deve começar com 312 ou 382." -ForegroundColor Red
 					$ramal = $null
-					$site = $null
+					continue
 				}
 			}
 
+			Write-Host "Ramal: $ramal | Site: $site" -ForegroundColor Green
+
 			Write-Host " Configurando Cisco para o ramal $ramal do site $site..." -ForegroundColor Cyan
 			if (Test-Path $cisoRegPath32) {
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "AlternateDeviceName" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "NetworkTabUI" -Type "DWord" -Value 2
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "EnableHttpDownload" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "TftpServer1" -Type "DWord" -Value 3229591562
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "TftpServer2" -Type "DWord" -Value 2206167050
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "AlternateTftp" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $cisoRegPath32 -Name "EnableSIP" -Type "String" -Value "AEC_$site`_$ramal"
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "AlternateDeviceName" -Type "DWord" -Value 1
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "NetworkTabUI" -Type "DWord" -Value 2
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "EnableHttpDownload" -Type "DWord" -Value 1
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "TftpServer1" -Type "DWord" -Value 3229591562
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "TftpServer2" -Type "DWord" -Value 2206167050
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "AlternateTftp" -Type "DWord" -Value 1
+				Invoke-Reg -Mode "Edit" -Action "Create" -Path $cisoRegPath32 -Name "EnableSIP" -Type "String" -Value "AEC_$site`_$ramal"
 			}
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
@@ -1585,26 +1399,10 @@ $scriptsTim = @(
 			if (-not (Get-SSCredential)) { return }	
 
 			$pin = $null
-			$lookupValue = (Read-Host "Informe o PIN ou usuário").Trim()
-			$searchResult = Search-RamalPinTim -LookupValue $lookupValue
-			if ($searchResult) {
-				$pin = $searchResult.Pin
-			}
-
-			if ([string]::IsNullOrEmpty($pin)) {
-				Write-Host " Login/PIN não localizado." -ForegroundColor Yellow
-				
-				$retryOptions = @("Tentar novamente", "Digitar manualmente")
-				$retryChoice = $null
-				Select-FromMenu -Options $retryOptions -OutputVariable ([ref]$retryChoice) -Prompt "Deseja tentar novamente ou digitar o PIN manualmente?"
-
-				if ($retryChoice -eq "Tentar novamente") {
-					$lookupValue = (Read-Host " Informe o PIN ou usuário novamente").Trim()
-					$searchResult = Search-RamalPinTim -LookupValue $lookupValue
-					if ($searchResult) {
-						$pin = $searchResult.Pin
-					}
-				}
+			$ramalInfo = Search-RamalPinTim
+			if ($ramalInfo) {
+				$pin = $ramalInfo.Pin
+				Write-Host " PIN: $($ramalInfo.Pin)" -ForegroundColor Yellow
 			}
 
 			while ([string]::IsNullOrEmpty($pin)) {
@@ -1624,56 +1422,25 @@ $scriptsTim = @(
 			}
 
 			Write-Host " Configurando CallControl para o PIN $pin..." -ForegroundColor Cyan
-			Edit-Reg -Action "Create" -Path "HKCU:\Environment" -Name "AgentID" -Type "String" -Value "$pin" | Out-Null
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path "HKCU:\Environment" -Name "AgentID" -Type "String" -Value "$pin" | Out-Null
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Ajusta Proxy TIM"
+		Nome = "Ajusta Proxy"
 		Acao = {
 			if (-not (Get-SSCredential)) { return }	
 
+			Write-Host " Configurando proxy para Tim..." -ForegroundColor Cyan
+
 			$proxyRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-			if (-not (Test-Path $proxyRegPath)) {
-				New-Item -Path $proxyRegPath -Force | Out-Null
-			}
-			$currentProxyEnable = Search-Reg -Path $proxyRegPath -Name "ProxyEnable"
-			$currentProxyServer = Search-Reg -Path $proxyRegPath -Name "ProxyServer"
-			$currentProxyOverride = Search-Reg -Path $proxyRegPath -Name "ProxyOverride"
 
-			$proxyModeOptions = @("Automático", "Manual")
-			$proxyModeChoice = $null
-			Select-FromMenu -Options $proxyModeOptions -OutputVariable ([ref]$proxyModeChoice) -Prompt "Escolha o modo de configuração do proxy TIM:"
+			$serverValue = "192.168.66.150:8080"
+			$overrideValue = "10.*;192.*;172.*;62.101.*;200.198.*;*.timbrasil.com.br;*.timsul.com.br;*.timint;*.tim.it;*.grupoaec.com.br;*.grupoaec.local;aplicacoestim;SNEP*;capps*;RJO*;rjocpdwe03;rjocpdwi07;ccare.blah.com;timbr.upstreamsystems.com;timx-search-prd-001*;exchange2016.aec.com.br;exchange2-2016.aec.com.br;spaceplanning-dev.azure-devices.net;snepsto01v;cbcf;sage;simig;br.msn.com;minhaaec;minhaaec.grupoaec.com.br;authb2b2c.tim.com.br;auth3b2b2c.tim.com.br;*googleapis.com;<local>"
 
-			if ([string]::IsNullOrEmpty($proxyModeChoice)) {
-				Write-Host " Operação cancelada." -ForegroundColor Yellow
-				return
-			}
-
-			Write-Host " Configurando proxy para a TIM..." -ForegroundColor Cyan
-
-			if ($proxyModeChoice -eq "Automático") {
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value "192.168.66.150:8080"
-				Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value "10.*;192.*;172.*;62.101.*;200.198.*;*.timbrasil.com.br;*.timsul.com.br;*.timint;*.tim.it;*.grupoaec.com.br;*.grupoaec.local;aplicacoestim;SNEP*;capps*;RJO*;rjocpdwe03;rjocpdwi07;ccare.blah.com;timbr.upstreamsystems.com;timx-search-prd-001*;exchange2016.aec.com.br;exchange2-2016.aec.com.br;spaceplanning-dev.azure-devices.net;snepsto01v;cbcf;sage;simig;br.msn.com;minhaaec;minhaaec.grupoaec.com.br;authb2b2c.tim.com.br;auth3b2b2c.tim.com.br;*googleapis.com;<local>"
-				Write-Host " Configuração concluída!" -ForegroundColor Green
-				return
-			}
-
-			$manualValues = Show-ProxyForm `
-				-CurrentProxyEnable $currentProxyEnable `
-				-CurrentProxyServer $(if ($null -eq $currentProxyServer) { "" } else { [string]$currentProxyServer }) `
-				-CurrentProxyOverride $(if ($null -eq $currentProxyOverride) { "" } else { [string]$currentProxyOverride })
-
-			if ($null -eq $manualValues) {
-				Write-Host " Operação cancelada." -ForegroundColor Yellow
-				return
-			}
-
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value $manualValues.ProxyEnable
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $manualValues.ProxyServer
-			Edit-Reg -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $manualValues.ProxyOverride
-
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyEnable" -Type "DWord" -Value 1
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyServer" -Type "String" -Value $serverValue
+			Invoke-Reg -Mode "Edit" -Action "Create" -Path $proxyRegPath -Name "ProxyOverride" -Type "String" -Value $overrideValue
 			Write-Host " Configuração concluída!" -ForegroundColor Green
 		}
 	}
@@ -1691,12 +1458,22 @@ $scriptsTim = @(
 				return
 			}
 
-			$user = Get-ActiveUser
-			$userDir = "C:\users\$user\"
+			$username = (Get-ActiveUser).username
+			$userDir = "C:\users\$username\"
 			$publicDesktop = "$env:PUBLIC\Desktop"
 
-			Remove-FSItem -Path "$userDir\Desktop\*"
-            Remove-FSItem -Path "$publicDesktop\*"
+			try {
+				Remove-Item -Path "$userDir\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
+			try {
+				Remove-Item -Path "$publicDesktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+				Write-Host (" Erro ao remover item do sistema de arquivos: {0}" -f $_.Exception.Message) -ForegroundColor Red
+			}
 			
 			$teamViewerPath = "${env:ProgramFiles}\TeamViewer\TeamViewer.exe"
 
@@ -1717,15 +1494,21 @@ $scriptsTim = @(
 			switch ($operacao) {
 				"MOC" {
 					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"ORI" {
 					$networkPath = "\\mercurio-vm2.grupoaec.com.br\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"RJO" {
 					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination "$publicDesktop")) { return }
+					$pathToCheck = Split-Path -Path $networkPath -Parent
+					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
@@ -1749,15 +1532,18 @@ $scriptsTim = @(
 			switch ($operacao) {
 				"MOC" {
 					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Hosts\HOSTS"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"ORI" {
 					$networkPath = "\\mercurio-vm2\script_tim_ipcc.$\Host\HOSTS"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				"RJO" {
 					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Host\HOSTS"
-					if (-not (Copy-ItemSafe -Path $networkPath -Destination $hostsDir)) { return }
+					if (-not (Test-Path -Path $networkPath -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					Copy-Item -Path $networkPath -Destination $hostsDir -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
 			}
@@ -1767,9 +1553,10 @@ $scriptsTim = @(
 
 $segments = @{
 	Geral = $scriptsGeral
+	Programas = $scriptsProgramas
 	Claro = $scriptsClaro
 	Oi    = $scriptsOi
 	Tim   = $scriptsTim
 }
 
-Show-SegmentMenu -Segments $segments
+Show-FirstMenu -Segments $segments
