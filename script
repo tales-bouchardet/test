@@ -602,7 +602,6 @@ $scriptsGeral = @(
 			Stop-Process -Name msedge* -Force -ErrorAction SilentlyContinue
 
 			Write-Host " Atualizando políticas de grupo..." -ForegroundColor Cyan
-			gpupdate /force | Out-Null
 
 			function New-EdgeShortcut {
 				param(
