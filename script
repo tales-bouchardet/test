@@ -18,13 +18,19 @@ function Get-SSCredential {
 }
 
 function Get-ActiveUser {
-	$rawUser = (Get-CimInstance Win32_ComputerSystem).UserName
-	$username = $rawUser.TrimStart('GRUPO_A&C\')
-	$sid = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | Where-Object { $_.ProfileImagePath -eq "C:\Users\$username" }).PSChildName
-	return [pscustomobject]@{
-		username = $username
-		sid      = $sid
-	}
+    $rawUser = (Get-CimInstance Win32_ComputerSystem).UserName
+    if ($rawUser.StartsWith("GRUPO_A&C\")) {
+        $username = $rawUser.Substring("GRUPO_A&C\".Length)
+    }
+    elseif ($rawUser.StartsWith("$env:COMPUTERNAME\")) {
+        $username = $rawUser.Substring(("$env:COMPUTERNAME\".Length))
+    }
+    $sid = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' |
+            Where-Object { $_.ProfileImagePath -eq "C:\Users\$username" }).PSChildName
+    return [pscustomobject]@{
+        username = $username
+        sid      = $sid
+    }
 }
 
 function Invoke-Reg {
@@ -282,8 +288,7 @@ function Search-RamalPinTim {
 
 	$ramalPath = "\\romulo.grupoaec.com.br\script_tim.$\Ramal_TIM\RamalP.txt"
 
-	if (-not (Test-Connection "romulo.grupoaec.com.br" -Count 2)) {
-		Write-Host "Sem acesso ao caminho de rede interna"
+	if (-not (Test-Connection "romulo.grupoaec.com.br" -Count 2)) {Write-Host "Sem acesso ao caminho de rede interna"
 		return $null
 	}
 
@@ -307,7 +312,6 @@ function Search-RamalPinTim {
     Write-Host "Usuário '$username' não encontrado no arquivo." -ForegroundColor Yellow
     return $null
 }
-
 
 #-------------------------------------------------------------Script Session----------------------------------------------------------
 #-------------------------------------------------------------Scripts Gerais----------------------------------------------------------
@@ -410,7 +414,7 @@ $scriptsGeral = @(
 		}
 	}
 	[pscustomobject]@{
-		Nome = "Desempenho Windows 11/Debloat"
+		Nome = "Desempenho/Win11 Debloat"
 		Acao = {
 			Stop-Process -Name Widgets -ErrorAction SilentlyContinue
 			Get-AppxPackage Microsoft.WidgetsPlatformRuntime -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
@@ -763,7 +767,12 @@ $scriptsProgramas = @(
 			}
 			
 			Write-Host "Chrome desinstalado com sucesso!" -ForegroundColor Green
-
+		}
+	}
+		[PSCustomObject]@{
+		Nome = "Desinstalar Chrome"
+		Acao = {
+	
 		}
 	}
 )
@@ -818,20 +827,17 @@ $scriptsClaro = @(
 			switch ($operacao) {
 				"AIR" {
 					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
-					$pathToCheck = Split-Path -Path $networkPath -Parent
-					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Path -Path "abas2.grupoaec.com.br" -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"PDI" {
 					$networkPath = "\\abas2.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_Movel\*"
-					$pathToCheck = Split-Path -Path $networkPath -Parent
-					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Path -Path "abas2.grupoaec.com.br" -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"CPV" {
 					$networkPath = "\\camila3.grupoaec.com.br\script_claro_ebt.$\Lnk_Desktop_ClaroEbt\*"
-					$pathToCheck = Split-Path -Path $networkPath -Parent
-					if (-not (Test-Path -Path $pathToCheck -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
+					if (-not (Test-Path -Path "camila3.grupoaec.com.br" -ErrorAction SilentlyContinue)) { Write-Host "Sem acesso ao caminho de rede interna"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				default { Write-Host "Operação inválida" -ForegroundColor Red }
@@ -1169,7 +1175,6 @@ MLj73Lz865UixNDeC3zIPo0F5hNp8Og4j+PJ6+wY0qwtPhb0oNpiOan4mxrCWXYt
 8mAlby9HLCYnypJI68/7DhDyVLzb1BhrPMVKRrhLQk561+FqmrlXxdNXext3LxRs
 S3IkMJlB1iDbOhwNJNRgN95eAGbDgW4NahgrSy26EjQ=
 -----END CERTIFICATE-----
-
 "@
 
 			$ca01Content | Set-Content -Path "$folder\corp-CAPKI01-CA.crt" -Encoding UTF8
@@ -1477,19 +1482,16 @@ $scriptsTim = @(
 			switch ($operacao) {
 				"MOC" {
 					$networkPath = "\\romulo.grupoaec.com.br\script_tim.$\Lnk_TIM_HomeOffice\*"
-					$pathToCheck = Split-Path -Path $networkPath -Parent
 					if (-not (Test-Connection "romulo.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\romulo"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"ORI" {
 					$networkPath = "\\mercurio-vm2.grupoaec.com.br\script_tim_ipcc.$\Arquivos\Lnk_TIM_IPCC\*"
-					$pathToCheck = Split-Path -Path $networkPath -Parent
 					if (-not (Test-Connection "mercurio-vm2.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\mercurio-vm2"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
 				"RJO" {
 					$networkPath = "\\pamela2.grupoaec.com.br\script_tim.$\Lnk_TIM_Labs_Atendente\Lnk_Desktop_VPN\*"
-					$pathToCheck = Split-Path -Path $networkPath -Parent
 					if (-not (Test-Connection "pamela2.grupoaec.com.br" -Count 2)) { Write-Host "Sem acesso ao \\pamela2"; return }
 					Copy-Item -Path $networkPath -Destination "$publicDesktop" -Force -ErrorAction SilentlyContinue
 				}
